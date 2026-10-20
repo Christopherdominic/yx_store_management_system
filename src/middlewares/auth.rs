@@ -2,14 +2,20 @@ use axum::{extract::FromRequestParts, http::header::AUTHORIZATION, http::request
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::{errors::AppError, services, state::AppState};
+use crate::{
+    errors::AppError,
+    models::{BusinessId, UserId},
+    services,
+    state::AppState,
+};
 
 /// The authenticated caller. Adding this extractor to a handler makes the
 /// route protected: a missing, expired, idle, or revoked token yields 401.
 #[derive(Debug, Clone, FromRow)]
 pub struct AuthUser {
     pub session_id: Uuid,
-    pub user_id: Uuid,
+    pub user_id: UserId,
+    pub business_id: BusinessId,
     pub email: String,
     pub full_name: String,
 }

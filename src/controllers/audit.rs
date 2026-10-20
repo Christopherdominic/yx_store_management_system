@@ -1,10 +1,9 @@
 use axum::extract::State;
-use uuid::Uuid;
 
 use crate::{
     errors::AppResult,
     middlewares::auth::AuthUser,
-    models::{audit::AuditLog, roles::Permission},
+    models::{AuditLog, BusinessId, Permission},
     services::{
         access::authorize,
         audit::{self, AuditFilter},
@@ -16,7 +15,7 @@ use crate::{
 pub async fn list(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(business_id): Path<Uuid>,
+    Path(business_id): Path<BusinessId>,
     Query(filter): Query<AuditFilter>,
 ) -> AppResult<Json<Vec<AuditLog>>> {
     authorize(

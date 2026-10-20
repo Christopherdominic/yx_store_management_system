@@ -1,26 +1,29 @@
 //! Business profile and business-wide settings (FR-01, FR-03).
 
 use chrono::Utc;
+use rust_decimal::Decimal;
 use serde::Deserialize;
-use sqlx::{PgConnection, PgPool};
-use uuid::Uuid;
+use sqlx::{PgConnection, PgPool, types::Json};
 
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        business::{Business, BusinessSettings},
-        roles::BusinessRole,
+        Address, AuditAction, Business, BusinessId, BusinessSettings, BusinessStatus, ContactInfo,
+        CurrencyCode, RecordType, UserId,
     },
     services::audit::AuditEntry,
-    utils::validation::{Validator, clean, clean_opt, patch_opt},
+    utils::validation::{Validator, clean, clean_address, clean_opt, patch_opt},
 };
+
+pub const DEFAULT_CURRENCY: &str = "NGN";
+pub const DEFAULT_TIMEZONE: &str = "Africa/Lagos";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBusiness {
     pub legal_name: String,
-    pub trading_name: String,
+    pub trading_name: Option<String>,
     pub registration_number: Option<String>,
-    pub address: String,
+    pub address: Address,
     pub phone: Option<String>,
     pub email: Option<String>,
     pub logo_url: Option<String>,
@@ -34,7 +37,7 @@ pub struct UpdateBusinessProfile {
     pub legal_name: Option<String>,
     pub trading_name: Option<String>,
     pub registration_number: Option<String>,
-    pub address: Option<String>,
+    pub address: Option<Address>,
     pub phone: Option<String>,
     pub email: Option<String>,
     pub logo_url: Option<String>,
@@ -45,23 +48,21 @@ pub struct UpdateBusinessSettings {
     pub base_currency: Option<String>,
     pub timezone: Option<String>,
     pub tax_name: Option<String>,
-    pub tax_rate_bps: Option<i32>,
+    /// Percentage as a decimal string, e.g. `"7.5"`.
+    pub tax_rate: Option<Decimal>,
     pub prices_include_tax: Option<bool>,
     pub tax_id: Option<String>,
     pub receipt_header: Option<String>,
     pub receipt_footer: Option<String>,
-    pub phone: Option<String>,
-    pub email: Option<String>,
 }
 
-fn validate(b: &Business) -> AppResult<()> {
-    let mut v = Validator::new();
+fn validate_profile(b: &Business, v: &mut Validator) {
     v.required("legal_name", &b.legal_name, 200);
-    v.required("trading_name", &b.trading_name, 200);
+    v.optional("trading_name", b.trading_name.as_deref(), 200);
     v.optional("registration_number", b.registration_number.as_deref(), 50);
-    v.required("address", &b.address, 500);
-    v.optional("phone", b.phone.as_deref(), 30);
-    v.email("email", b.email.as_deref());
+    v.address("address", &b.address);
+    v.optional("phone", b.contact.phone.as_deref(), 30);
+    v.email("email", b.contact.email.as_deref());
     v.optional("logo_url", b.logo_url.as_deref(), 2048);
     if let Some(url) = &b.logo_url {
         v.check(
@@ -70,107 +71,69 @@ fn validate(b: &Business) -> AppResult<()> {
             "must be an http(s) URL",
         );
     }
-    v.currency("base_currency", &b.base_currency);
     v.timezone("timezone", &b.timezone);
-    v.required("tax_name", &b.tax_name, 30);
-    v.check(
-        (0..=10_000).contains(&b.tax_rate_bps),
-        "tax_rate_bps",
-        "must be between 0 and 10000 basis points (0%-100%)",
-    );
-    v.optional("tax_id", b.tax_id.as_deref(), 50);
-    v.optional("receipt_header", b.receipt_header.as_deref(), 500);
-    v.optional("receipt_footer", b.receipt_footer.as_deref(), 500);
-    v.finish()
 }
 
-/// Creates a business and makes the creator its owner.
-pub async fn create(pool: &PgPool, actor: Uuid, input: CreateBusiness) -> AppResult<Business> {
+/// Cleans and validates a new business, recording problems in `v`. The
+/// result must only be used once `v.finish()` succeeds.
+pub fn prepare(input: CreateBusiness, v: &mut Validator) -> Business {
+    let currency = input.base_currency.as_deref().unwrap_or(DEFAULT_CURRENCY);
+    let base_currency = v.currency("base_currency", currency);
     let now = Utc::now();
     let business = Business {
-        id: Uuid::new_v4(),
+        id: BusinessId::generate(),
         legal_name: clean(input.legal_name),
-        trading_name: clean(input.trading_name),
+        trading_name: clean_opt(input.trading_name),
         registration_number: clean_opt(input.registration_number),
-        address: clean(input.address),
-        phone: clean_opt(input.phone),
-        email: clean_opt(input.email),
+        address: clean_address(input.address),
+        contact: ContactInfo {
+            phone: clean_opt(input.phone),
+            email: clean_opt(input.email),
+        },
         logo_url: clean_opt(input.logo_url),
-        base_currency: input
-            .base_currency
-            .map(|c| c.trim().to_uppercase())
-            .unwrap_or_else(|| "NGN".into()),
+        // Placeholder when invalid; the recorded error stops the request.
+        base_currency: base_currency.unwrap_or_else(|| CurrencyCode::new("XXX").expect("valid")),
         timezone: input
             .timezone
             .map(clean)
-            .unwrap_or_else(|| "Africa/Lagos".into()),
-        tax_name: "VAT".into(),
-        tax_rate_bps: 0,
-        prices_include_tax: false,
-        tax_id: None,
-        receipt_header: None,
-        receipt_footer: None,
-        created_by: actor,
+            .unwrap_or_else(|| DEFAULT_TIMEZONE.into()),
+        status: BusinessStatus::Active,
         created_at: now,
-        updated_by: actor,
         updated_at: now,
     };
-    validate(&business)?;
+    validate_profile(&business, v);
+    business
+}
 
-    let mut tx = pool.begin().await?;
+/// Inserts a prepared business with default settings.
+pub async fn insert(conn: &mut PgConnection, b: &Business) -> AppResult<Business> {
     let business = sqlx::query_as::<_, Business>(
         "INSERT INTO businesses (id, legal_name, trading_name, registration_number, address, phone,
-                                 email, logo_url, base_currency, timezone, created_by, updated_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+                                 email, logo_url, base_currency, timezone, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *",
     )
-    .bind(business.id)
-    .bind(&business.legal_name)
-    .bind(&business.trading_name)
-    .bind(&business.registration_number)
-    .bind(&business.address)
-    .bind(&business.phone)
-    .bind(&business.email)
-    .bind(&business.logo_url)
-    .bind(&business.base_currency)
-    .bind(&business.timezone)
-    .bind(actor)
-    .fetch_one(&mut *tx)
+    .bind(b.id)
+    .bind(&b.legal_name)
+    .bind(&b.trading_name)
+    .bind(&b.registration_number)
+    .bind(Json(&b.address))
+    .bind(&b.contact.phone)
+    .bind(&b.contact.email)
+    .bind(&b.logo_url)
+    .bind(&b.base_currency)
+    .bind(&b.timezone)
+    .bind(b.status)
+    .fetch_one(&mut *conn)
     .await?;
-    sqlx::query(
-        "INSERT INTO business_members (business_id, user_id, business_role) VALUES ($1, $2, $3)",
-    )
-    .bind(business.id)
-    .bind(actor)
-    .bind(BusinessRole::BusinessOwner)
-    .execute(&mut *tx)
-    .await?;
-    AuditEntry::new("business.created", "business")
-        .business(business.id)
-        .actor(actor)
-        .entity(business.id)
-        .after(&business)
-        .record(&mut *tx)
+    sqlx::query("INSERT INTO business_settings (business_id) VALUES ($1)")
+        .bind(business.id)
+        .execute(&mut *conn)
         .await?;
-    tx.commit().await?;
     Ok(business)
 }
 
-/// Businesses where the user is an active member.
-pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<Vec<Business>> {
-    let businesses = sqlx::query_as::<_, Business>(
-        "SELECT b.* FROM businesses b
-         JOIN business_members bm ON bm.business_id = b.id
-         WHERE bm.user_id = $1 AND bm.is_active
-         ORDER BY b.trading_name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(businesses)
-}
-
-pub async fn get(pool: &PgPool, business_id: Uuid) -> AppResult<Business> {
+pub async fn get(pool: &PgPool, business_id: BusinessId) -> AppResult<Business> {
     sqlx::query_as::<_, Business>("SELECT * FROM businesses WHERE id = $1")
         .bind(business_id)
         .fetch_optional(pool)
@@ -178,7 +141,7 @@ pub async fn get(pool: &PgPool, business_id: Uuid) -> AppResult<Business> {
         .ok_or(AppError::NotFound("business"))
 }
 
-async fn lock(conn: &mut PgConnection, business_id: Uuid) -> AppResult<Business> {
+async fn lock(conn: &mut PgConnection, business_id: BusinessId) -> AppResult<Business> {
     sqlx::query_as::<_, Business>("SELECT * FROM businesses WHERE id = $1 FOR UPDATE")
         .bind(business_id)
         .fetch_optional(conn)
@@ -186,13 +149,12 @@ async fn lock(conn: &mut PgConnection, business_id: Uuid) -> AppResult<Business>
         .ok_or(AppError::NotFound("business"))
 }
 
-async fn save(conn: &mut PgConnection, b: &Business, actor: Uuid) -> AppResult<Business> {
+async fn save(conn: &mut PgConnection, b: &Business) -> AppResult<Business> {
     let saved = sqlx::query_as::<_, Business>(
         "UPDATE businesses SET
             legal_name = $2, trading_name = $3, registration_number = $4, address = $5,
             phone = $6, email = $7, logo_url = $8, base_currency = $9, timezone = $10,
-            tax_name = $11, tax_rate_bps = $12, prices_include_tax = $13, tax_id = $14,
-            receipt_header = $15, receipt_footer = $16, updated_by = $17, updated_at = now()
+            updated_at = now()
          WHERE id = $1
          RETURNING *",
     )
@@ -200,19 +162,12 @@ async fn save(conn: &mut PgConnection, b: &Business, actor: Uuid) -> AppResult<B
     .bind(&b.legal_name)
     .bind(&b.trading_name)
     .bind(&b.registration_number)
-    .bind(&b.address)
-    .bind(&b.phone)
-    .bind(&b.email)
+    .bind(Json(&b.address))
+    .bind(&b.contact.phone)
+    .bind(&b.contact.email)
     .bind(&b.logo_url)
     .bind(&b.base_currency)
     .bind(&b.timezone)
-    .bind(&b.tax_name)
-    .bind(b.tax_rate_bps)
-    .bind(b.prices_include_tax)
-    .bind(&b.tax_id)
-    .bind(&b.receipt_header)
-    .bind(&b.receipt_footer)
-    .bind(actor)
     .fetch_one(conn)
     .await?;
     Ok(saved)
@@ -220,8 +175,8 @@ async fn save(conn: &mut PgConnection, b: &Business, actor: Uuid) -> AppResult<B
 
 pub async fn update_profile(
     pool: &PgPool,
-    actor: Uuid,
-    business_id: Uuid,
+    actor: UserId,
+    business_id: BusinessId,
     input: UpdateBusinessProfile,
 ) -> AppResult<Business> {
     let mut tx = pool.begin().await?;
@@ -230,29 +185,57 @@ pub async fn update_profile(
     if let Some(v) = input.legal_name {
         b.legal_name = clean(v);
     }
-    if let Some(v) = input.trading_name {
-        b.trading_name = clean(v);
-    }
     if let Some(v) = input.address {
-        b.address = clean(v);
+        b.address = clean_address(v);
     }
+    b.trading_name = patch_opt(b.trading_name, input.trading_name);
     b.registration_number = patch_opt(b.registration_number, input.registration_number);
-    b.phone = patch_opt(b.phone, input.phone);
-    b.email = patch_opt(b.email, input.email);
+    b.contact.phone = patch_opt(b.contact.phone, input.phone);
+    b.contact.email = patch_opt(b.contact.email, input.email);
     b.logo_url = patch_opt(b.logo_url, input.logo_url);
-    validate(&b)?;
+    let mut v = Validator::new();
+    validate_profile(&b, &mut v);
+    v.finish()?;
 
-    let after = save(&mut tx, &b, actor).await?;
-    AuditEntry::new("business.updated", "business")
-        .business(business_id)
+    let after = save(&mut tx, &b).await?;
+    AuditEntry::new(business_id, AuditAction::Updated)
         .actor(actor)
-        .entity(business_id)
+        .record(RecordType::Business, business_id)
         .before(&before)
         .after(&after)
-        .record(&mut *tx)
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(after)
+}
+
+async fn read_settings(
+    conn: &mut PgConnection,
+    business_id: BusinessId,
+    for_update: bool,
+) -> AppResult<BusinessSettings> {
+    let query = if for_update {
+        "SELECT b.id AS business_id, b.base_currency, b.timezone, s.tax_name, s.tax_rate,
+                s.prices_include_tax, s.tax_id, s.receipt_header, s.receipt_footer, s.updated_at
+         FROM businesses b JOIN business_settings s ON s.business_id = b.id
+         WHERE b.id = $1
+         FOR UPDATE"
+    } else {
+        "SELECT b.id AS business_id, b.base_currency, b.timezone, s.tax_name, s.tax_rate,
+                s.prices_include_tax, s.tax_id, s.receipt_header, s.receipt_footer, s.updated_at
+         FROM businesses b JOIN business_settings s ON s.business_id = b.id
+         WHERE b.id = $1"
+    };
+    sqlx::query_as::<_, BusinessSettings>(query)
+        .bind(business_id)
+        .fetch_optional(conn)
+        .await?
+        .ok_or(AppError::NotFound("business"))
+}
+
+pub async fn get_settings(pool: &PgPool, business_id: BusinessId) -> AppResult<BusinessSettings> {
+    let mut conn = pool.acquire().await?;
+    read_settings(&mut conn, business_id, false).await
 }
 
 /// Settings take effect for transactions created after the change; stored
@@ -260,47 +243,79 @@ pub async fn update_profile(
 /// never rewrites history (FR-03, FR-30).
 pub async fn update_settings(
     pool: &PgPool,
-    actor: Uuid,
-    business_id: Uuid,
+    actor: UserId,
+    business_id: BusinessId,
     input: UpdateBusinessSettings,
 ) -> AppResult<BusinessSettings> {
     let mut tx = pool.begin().await?;
-    let before = lock(&mut tx, business_id).await?;
-    let mut b = before.clone();
-    if let Some(v) = input.base_currency {
-        b.base_currency = v.trim().to_uppercase();
+    let before = read_settings(&mut tx, business_id, true).await?;
+    let mut s = before.clone();
+    let mut v = Validator::new();
+    if let Some(code) = input.base_currency
+        && let Some(code) = v.currency("base_currency", &code)
+    {
+        s.base_currency = code;
     }
-    if let Some(v) = input.timezone {
-        b.timezone = clean(v);
+    if let Some(tz) = input.timezone {
+        s.timezone = clean(tz);
     }
-    if let Some(v) = input.tax_name {
-        b.tax_name = clean(v);
+    if let Some(name) = input.tax_name {
+        s.tax_name = clean(name);
     }
-    if let Some(v) = input.tax_rate_bps {
-        b.tax_rate_bps = v;
+    if let Some(rate) = input.tax_rate {
+        s.tax_rate = rate;
     }
-    if let Some(v) = input.prices_include_tax {
-        b.prices_include_tax = v;
+    if let Some(inclusive) = input.prices_include_tax {
+        s.prices_include_tax = inclusive;
     }
-    b.tax_id = patch_opt(b.tax_id, input.tax_id);
-    b.receipt_header = patch_opt(b.receipt_header, input.receipt_header);
-    b.receipt_footer = patch_opt(b.receipt_footer, input.receipt_footer);
-    b.phone = patch_opt(b.phone, input.phone);
-    b.email = patch_opt(b.email, input.email);
-    validate(&b)?;
+    s.tax_id = patch_opt(s.tax_id, input.tax_id);
+    s.receipt_header = patch_opt(s.receipt_header, input.receipt_header);
+    s.receipt_footer = patch_opt(s.receipt_footer, input.receipt_footer);
 
-    let after = save(&mut tx, &b, actor).await?;
-    let (before, after) = (
-        BusinessSettings::from(&before),
-        BusinessSettings::from(&after),
+    v.timezone("timezone", &s.timezone);
+    v.required("tax_name", &s.tax_name, 30);
+    v.check(
+        s.tax_rate >= Decimal::ZERO
+            && s.tax_rate <= Decimal::ONE_HUNDRED
+            && s.tax_rate.scale() <= 4,
+        "tax_rate",
+        "must be a percentage between 0 and 100 with at most 4 decimal places",
     );
-    AuditEntry::new("business.settings_updated", "business")
-        .business(business_id)
+    v.optional("tax_id", s.tax_id.as_deref(), 50);
+    v.optional("receipt_header", s.receipt_header.as_deref(), 500);
+    v.optional("receipt_footer", s.receipt_footer.as_deref(), 500);
+    v.finish()?;
+
+    sqlx::query(
+        "UPDATE businesses SET base_currency = $2, timezone = $3, updated_at = now() WHERE id = $1",
+    )
+    .bind(business_id)
+    .bind(&s.base_currency)
+    .bind(&s.timezone)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE business_settings SET
+            tax_name = $2, tax_rate = $3, prices_include_tax = $4, tax_id = $5,
+            receipt_header = $6, receipt_footer = $7, updated_at = now()
+         WHERE business_id = $1",
+    )
+    .bind(business_id)
+    .bind(&s.tax_name)
+    .bind(s.tax_rate)
+    .bind(s.prices_include_tax)
+    .bind(&s.tax_id)
+    .bind(&s.receipt_header)
+    .bind(&s.receipt_footer)
+    .execute(&mut *tx)
+    .await?;
+    let after = read_settings(&mut tx, business_id, false).await?;
+    AuditEntry::new(business_id, AuditAction::SettingsChanged)
         .actor(actor)
-        .entity(business_id)
+        .record(RecordType::Business, business_id)
         .before(&before)
         .after(&after)
-        .record(&mut *tx)
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(after)

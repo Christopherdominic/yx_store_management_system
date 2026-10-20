@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use crate::{
     errors::{AppError, FieldError},
+    models::{Address, CurrencyCode},
     utils::currency::is_valid_currency,
 };
 
@@ -70,9 +71,32 @@ impl Validator {
         }
     }
 
-    pub fn currency(&mut self, field: &str, value: &str) {
-        if !is_valid_currency(value) {
-            self.error(field, "must be a valid ISO 4217 currency code, e.g. NGN");
+    /// Parses an ISO 4217 code; returns `None` (and records an error) when invalid.
+    pub fn currency(&mut self, field: &str, value: &str) -> Option<CurrencyCode> {
+        match CurrencyCode::new(value) {
+            Ok(code) if is_valid_currency(code.as_str()) => Some(code),
+            _ => {
+                self.error(field, "must be a valid ISO 4217 currency code, e.g. NGN");
+                None
+            }
+        }
+    }
+
+    pub fn address(&mut self, field: &str, address: &Address) {
+        self.required(&format!("{field}.line1"), &address.line1, 200);
+        self.optional(&format!("{field}.line2"), address.line2.as_deref(), 200);
+        self.required(&format!("{field}.city"), &address.city, 100);
+        self.optional(&format!("{field}.state"), address.state.as_deref(), 100);
+        self.optional(
+            &format!("{field}.postal_code"),
+            address.postal_code.as_deref(),
+            20,
+        );
+        if address.country.len() != 2 || !address.country.bytes().all(|b| b.is_ascii_uppercase()) {
+            self.error(
+                &format!("{field}.country"),
+                "must be an ISO 3166-1 alpha-2 code, e.g. NG",
+            );
         }
     }
 
@@ -146,6 +170,18 @@ pub fn like_pattern(term: &str) -> String {
         .replace('%', "\\%")
         .replace('_', "\\_");
     format!("%{escaped}%")
+}
+
+/// Trims every part of an address and uppercases the country code.
+pub fn clean_address(address: Address) -> Address {
+    Address {
+        line1: clean(address.line1),
+        line2: clean_opt(address.line2),
+        city: clean(address.city),
+        state: clean_opt(address.state),
+        postal_code: clean_opt(address.postal_code),
+        country: address.country.trim().to_ascii_uppercase(),
+    }
 }
 
 pub fn normalize_email(email: &str) -> String {

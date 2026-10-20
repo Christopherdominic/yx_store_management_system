@@ -1,10 +1,9 @@
 use axum::{extract::State, http::StatusCode};
-use uuid::Uuid;
 
 use crate::{
     errors::AppResult,
     middlewares::auth::AuthUser,
-    models::{roles::Permission, user::Employee},
+    models::{BusinessId, Employee, Permission, StoreId, UserId, UserStatus},
     services::{
         access::authorize,
         employees::{
@@ -18,7 +17,7 @@ use crate::{
 pub async fn create(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(business_id): Path<Uuid>,
+    Path(business_id): Path<BusinessId>,
     Json(input): Json<CreateEmployee>,
 ) -> AppResult<(StatusCode, Json<Employee>)> {
     let access = authorize(
@@ -36,7 +35,7 @@ pub async fn create(
 pub async fn list(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(business_id): Path<Uuid>,
+    Path(business_id): Path<BusinessId>,
     Query(filter): Query<EmployeeFilter>,
 ) -> AppResult<Json<Vec<Employee>>> {
     let access = authorize(
@@ -53,7 +52,7 @@ pub async fn list(
 pub async fn get(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, user_id)): Path<(BusinessId, UserId)>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
         &state,
@@ -69,7 +68,7 @@ pub async fn get(
 pub async fn update(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, user_id)): Path<(BusinessId, UserId)>,
     Json(input): Json<UpdateEmployee>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
@@ -88,7 +87,7 @@ pub async fn update(
 pub async fn deactivate(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, user_id)): Path<(BusinessId, UserId)>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
         &state,
@@ -99,14 +98,14 @@ pub async fn deactivate(
     )
     .await?;
     Ok(Json(
-        employees::set_active(&state.pool, &access, user_id, false).await?,
+        employees::set_status(&state.pool, &access, user_id, UserStatus::Deactivated).await?,
     ))
 }
 
 pub async fn reactivate(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, user_id)): Path<(BusinessId, UserId)>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
         &state,
@@ -117,14 +116,14 @@ pub async fn reactivate(
     )
     .await?;
     Ok(Json(
-        employees::set_active(&state.pool, &access, user_id, true).await?,
+        employees::set_status(&state.pool, &access, user_id, UserStatus::Active).await?,
     ))
 }
 
 pub async fn set_business_role(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, user_id)): Path<(BusinessId, UserId)>,
     Json(input): Json<SetBusinessRole>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
@@ -143,7 +142,7 @@ pub async fn set_business_role(
 pub async fn assign_store(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id, store_id)): Path<(Uuid, Uuid, Uuid)>,
+    Path((business_id, user_id, store_id)): Path<(BusinessId, UserId, StoreId)>,
     Json(input): Json<AssignStore>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
@@ -162,7 +161,7 @@ pub async fn assign_store(
 pub async fn unassign_store(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, user_id, store_id)): Path<(Uuid, Uuid, Uuid)>,
+    Path((business_id, user_id, store_id)): Path<(BusinessId, UserId, StoreId)>,
 ) -> AppResult<Json<Employee>> {
     let access = authorize(
         &state,

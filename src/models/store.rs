@@ -1,50 +1,39 @@
+//! Physical store locations belonging to a business.
+
 use chrono::{DateTime, Utc};
-use serde::Serialize;
-use sqlx::FromRow;
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
-use super::text_enum;
+use super::common::{Address, ContactInfo};
+use super::ids::{BusinessId, StoreId};
 
-text_enum!(StoreStatus {
-    Active => "active",
-    Inactive => "inactive",
-});
-
-#[derive(Debug, Clone, Serialize, FromRow)]
+/// A store under a business (SRS FR-02, FR-03).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Store {
-    pub id: Uuid,
-    pub business_id: Uuid,
+    pub id: StoreId,
+    pub business_id: BusinessId,
+    /// Short code unique within the business, e.g. `LAG`. Used as the prefix
+    /// for receipt and transfer numbers.
     pub code: String,
     pub name: String,
-    pub address: String,
-    pub phone: Option<String>,
-    pub email: Option<String>,
+    pub address: Address,
+    pub contact: ContactInfo,
     pub status: StoreStatus,
-    pub receipt_prefix: String,
-    pub transaction_prefix: String,
-    pub receipt_footer: Option<String>,
-    pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
-    pub updated_by: Uuid,
     pub updated_at: DateTime<Utc>,
 }
 
-/// Store-level operational preferences (FR-03).
-#[derive(Debug, Clone, Serialize)]
-pub struct StoreSettings {
-    pub store_id: Uuid,
-    pub receipt_prefix: String,
-    pub transaction_prefix: String,
-    pub receipt_footer: Option<String>,
+impl Store {
+    /// Whether the store may accept new sales, stock movements, purchases
+    /// or transfers. Inactive stores keep their history readable.
+    pub fn is_operational(&self) -> bool {
+        self.status == StoreStatus::Active
+    }
 }
 
-impl From<&Store> for StoreSettings {
-    fn from(s: &Store) -> Self {
-        Self {
-            store_id: s.id,
-            receipt_prefix: s.receipt_prefix.clone(),
-            transaction_prefix: s.transaction_prefix.clone(),
-            receipt_footer: s.receipt_footer.clone(),
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreStatus {
+    #[default]
+    Active,
+    Inactive,
 }

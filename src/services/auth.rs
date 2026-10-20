@@ -4,19 +4,20 @@ use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 
 use crate::{
     errors::{AppError, AppResult},
     middlewares::auth::AuthUser,
     models::{
-        audit::AuditOutcome,
-        roles::{BusinessRole, StoreRole},
-        user::{Membership, StoreAssignment, User},
+        AuditAction, AuditOutcome, Business, BusinessId, RecordType, Role, RoleAssignmentId,
+        StoreId, User, UserId,
     },
-    services::audit::AuditEntry,
+    services::{
+        audit::AuditEntry,
+        businesses::{self, CreateBusiness},
+    },
     state::AppState,
     utils::{
         crypto::{
@@ -30,11 +31,138 @@ use crate::{
 const INVALID_CREDENTIALS: &str = "invalid email or password";
 
 #[derive(Debug, Deserialize)]
-pub struct RegisterInput {
+pub struct NewUser {
     pub full_name: String,
     pub email: String,
     pub phone: Option<String>,
     pub password: String,
+}
+
+impl NewUser {
+    pub fn clean(self) -> Self {
+        Self {
+            full_name: clean(self.full_name),
+            email: normalize_email(&self.email),
+            phone: clean_opt(self.phone),
+            password: self.password,
+        }
+    }
+
+    pub fn validate(&self, v: &mut Validator, prefix: &str) {
+        v.required(&format!("{prefix}full_name"), &self.full_name, 200);
+        v.required(&format!("{prefix}email"), &self.email, 254);
+        v.email(&format!("{prefix}email"), Some(&self.email));
+        v.optional(&format!("{prefix}phone"), self.phone.as_deref(), 30);
+        v.password(&format!("{prefix}password"), &self.password);
+    }
+}
+
+/// Self-service onboarding: creates a business and its owner account.
+/// Staff accounts are created by administrators (FR-05).
+#[derive(Debug, Deserialize)]
+pub struct RegisterInput {
+    pub business: CreateBusiness,
+    pub owner: NewUser,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Registration {
+    pub business: Business,
+    pub owner: User,
+}
+
+pub async fn register(state: &AppState, input: RegisterInput) -> AppResult<Registration> {
+    if !state.config.allow_owner_signup {
+        return Err(AppError::Forbidden);
+    }
+    let owner = input.owner.clean();
+    let mut v = Validator::new();
+    let business = businesses::prepare(input.business, &mut v);
+    owner.validate(&mut v, "owner.");
+    v.finish()?;
+
+    let password_hash = hash_password_async(owner.password.clone()).await?;
+    let mut tx = state.pool.begin().await?;
+    let business = businesses::insert(&mut tx, &business).await?;
+    let user = insert_user(&mut tx, business.id, &owner, &password_hash).await?;
+    insert_role(
+        &mut tx,
+        business.id,
+        user.id,
+        None,
+        Role::BusinessOwner,
+        user.id,
+    )
+    .await?;
+    AuditEntry::new(business.id, AuditAction::Created)
+        .actor(user.id)
+        .record(RecordType::Business, business.id)
+        .after(&business)
+        .record_in(&mut *tx)
+        .await?;
+    AuditEntry::new(business.id, AuditAction::Created)
+        .actor(user.id)
+        .record(RecordType::User, user.id)
+        .after(&user)
+        .details("business owner registered")
+        .record_in(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Registration {
+        business,
+        owner: user,
+    })
+}
+
+/// Inserts a user and their credentials (`user.password` is ignored; pass
+/// its hash).
+pub async fn insert_user(
+    conn: &mut PgConnection,
+    business_id: BusinessId,
+    user: &NewUser,
+    password_hash: &str,
+) -> AppResult<User> {
+    let created = sqlx::query_as::<_, User>(
+        "INSERT INTO users (id, business_id, full_name, email, phone)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *",
+    )
+    .bind(UserId::generate())
+    .bind(business_id)
+    .bind(&user.full_name)
+    .bind(&user.email)
+    .bind(&user.phone)
+    .fetch_one(&mut *conn)
+    .await?;
+    sqlx::query("INSERT INTO user_credentials (user_id, password_hash) VALUES ($1, $2)")
+        .bind(created.id)
+        .bind(password_hash)
+        .execute(&mut *conn)
+        .await?;
+    Ok(created)
+}
+
+pub async fn insert_role(
+    conn: &mut PgConnection,
+    business_id: BusinessId,
+    user_id: UserId,
+    store_id: Option<StoreId>,
+    role: Role,
+    assigned_by: UserId,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO role_assignments (id, business_id, user_id, store_id, role, assigned_by)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(RoleAssignmentId::generate())
+    .bind(business_id)
+    .bind(user_id)
+    .bind(store_id)
+    .bind(role)
+    .bind(assigned_by)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -43,77 +171,6 @@ pub struct LoginResult {
     pub token_type: &'static str,
     pub expires_at: DateTime<Utc>,
     pub user: User,
-}
-
-/// Public sign-up for business owners only. The new account has no access
-/// to anything until it creates a business (or is added to one).
-pub async fn register_owner(state: &AppState, input: RegisterInput) -> AppResult<User> {
-    if !state.config.allow_owner_signup {
-        return Err(AppError::Forbidden);
-    }
-    let full_name = clean(input.full_name);
-    let email = normalize_email(&input.email);
-    let phone = clean_opt(input.phone);
-
-    let mut v = Validator::new();
-    v.required("full_name", &full_name, 200);
-    v.required("email", &email, 254);
-    v.email("email", Some(&email));
-    v.optional("phone", phone.as_deref(), 30);
-    v.password("password", &input.password);
-    v.finish()?;
-
-    let password_hash = hash_password_async(input.password).await?;
-    let mut tx = state.pool.begin().await?;
-    let user = insert_user(
-        &mut *tx,
-        &full_name,
-        &email,
-        phone.as_deref(),
-        &password_hash,
-        None,
-    )
-    .await?;
-    AuditEntry::new("auth.registered", "user")
-        .actor(user.id)
-        .entity(user.id)
-        .after(&user)
-        .record(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(user)
-}
-
-pub async fn insert_user(
-    executor: impl PgExecutor<'_>,
-    full_name: &str,
-    email: &str,
-    phone: Option<&str>,
-    password_hash: &str,
-    created_by: Option<Uuid>,
-) -> AppResult<User> {
-    let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, email, full_name, phone, password_hash, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING *",
-    )
-    .bind(Uuid::new_v4())
-    .bind(email)
-    .bind(full_name)
-    .bind(phone)
-    .bind(password_hash)
-    .bind(created_by)
-    .fetch_one(executor)
-    .await?;
-    Ok(user)
-}
-
-pub async fn get_user(pool: &PgPool, user_id: Uuid) -> AppResult<User> {
-    sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(AppError::NotFound("user"))
 }
 
 pub async fn login(state: &AppState, email: &str, password: String) -> AppResult<LoginResult> {
@@ -127,50 +184,65 @@ pub async fn login(state: &AppState, email: &str, password: String) -> AppResult
         // Spend the same time as a real check so response timing does not
         // reveal which emails are registered.
         let _ = tokio::task::spawn_blocking(move || verify_password(&password, dummy_hash())).await;
-        login_failed(state, None, "unknown_email").await;
+        tracing::info!("login failed: unknown email");
         return Err(AppError::Unauthorized(INVALID_CREDENTIALS.into()));
     };
 
-    if user.locked_until.is_some_and(|until| until > Utc::now()) {
-        login_failed(state, Some(user.id), "locked").await;
+    let (password_hash, locked_until): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT password_hash, locked_until FROM user_credentials WHERE user_id = $1",
+    )
+    .bind(user.id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    if locked_until.is_some_and(|until| until > Utc::now()) {
+        login_failed(state, &user, "account locked").await;
         return Err(AppError::TooManyRequests(
             "account temporarily locked after too many failed login attempts; try again later"
                 .into(),
         ));
     }
 
-    if !verify_password_async(password, user.password_hash.clone()).await? {
-        record_failed_attempt(state, user.id).await?;
-        login_failed(state, Some(user.id), "wrong_password").await;
+    if !verify_password_async(password, password_hash).await? {
+        record_failed_attempt(state, &user).await?;
+        login_failed(state, &user, "wrong password").await;
         return Err(AppError::Unauthorized(INVALID_CREDENTIALS.into()));
     }
 
-    if !user.is_active {
-        login_failed(state, Some(user.id), "account_deactivated").await;
+    if !user.is_active() {
+        login_failed(state, &user, "account deactivated").await;
         return Err(AppError::Unauthorized("account is deactivated".into()));
     }
 
     let token = generate_token();
     let expires_at = Utc::now() + state.config.session_ttl;
     let mut tx = state.pool.begin().await?;
-    sqlx::query("UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1")
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
-    let session_id = Uuid::new_v4();
+    sqlx::query(
+        "UPDATE user_credentials SET failed_login_attempts = 0, locked_until = NULL
+         WHERE user_id = $1",
+    )
+    .bind(user.id)
+    .execute(&mut *tx)
+    .await?;
+    let user = sqlx::query_as::<_, User>(
+        "UPDATE users SET last_login_at = now() WHERE id = $1 RETURNING *",
+    )
+    .bind(user.id)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query(
         "INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)",
     )
-    .bind(session_id)
+    .bind(Uuid::now_v7())
     .bind(user.id)
     .bind(hash_token(&token))
     .bind(expires_at)
     .execute(&mut *tx)
     .await?;
-    AuditEntry::new("auth.login", "session")
+    AuditEntry::new(user.business_id, AuditAction::Login)
         .actor(user.id)
-        .entity(session_id)
-        .record(&mut *tx)
+        .record(RecordType::User, user.id)
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
 
@@ -188,40 +260,38 @@ fn dummy_hash() -> &'static str {
 }
 
 /// Counts a failed attempt and locks the account once the limit is reached.
-async fn record_failed_attempt(state: &AppState, user_id: Uuid) -> AppResult<()> {
+async fn record_failed_attempt(state: &AppState, user: &User) -> AppResult<()> {
     let attempts: i32 = sqlx::query_scalar(
-        "UPDATE users SET failed_login_attempts = failed_login_attempts + 1
-         WHERE id = $1 RETURNING failed_login_attempts",
+        "UPDATE user_credentials SET failed_login_attempts = failed_login_attempts + 1
+         WHERE user_id = $1 RETURNING failed_login_attempts",
     )
-    .bind(user_id)
+    .bind(user.id)
     .fetch_one(&state.pool)
     .await?;
 
     if attempts >= state.config.max_failed_logins {
         let locked_until = Utc::now() + state.config.lockout_duration;
-        sqlx::query("UPDATE users SET failed_login_attempts = 0, locked_until = $2 WHERE id = $1")
-            .bind(user_id)
-            .bind(locked_until)
-            .execute(&state.pool)
-            .await?;
-        AuditEntry::new("auth.locked", "user")
-            .actor(user_id)
-            .entity(user_id)
-            .metadata(json!({ "locked_until": locked_until }))
-            .record_best_effort(&state.pool)
-            .await;
+        sqlx::query(
+            "UPDATE user_credentials SET failed_login_attempts = 0, locked_until = $2
+             WHERE user_id = $1",
+        )
+        .bind(user.id)
+        .bind(locked_until)
+        .execute(&state.pool)
+        .await?;
+        login_failed(state, user, &format!("account locked until {locked_until}")).await;
     }
     Ok(())
 }
 
-async fn login_failed(state: &AppState, user_id: Option<Uuid>, reason: &str) {
-    let mut entry = AuditEntry::new("auth.login", "session")
+async fn login_failed(state: &AppState, user: &User, reason: &str) {
+    AuditEntry::new(user.business_id, AuditAction::LoginFailed)
+        .actor(user.id)
+        .record(RecordType::User, user.id)
         .outcome(AuditOutcome::Failure)
-        .metadata(json!({ "reason": reason }));
-    if let Some(id) = user_id {
-        entry = entry.actor(id).entity(id);
-    }
-    entry.record_best_effort(&state.pool).await;
+        .details(reason)
+        .record_best_effort(&state.pool)
+        .await;
 }
 
 /// Resolves a bearer token to its user, enforcing expiry, idle timeout,
@@ -236,8 +306,8 @@ pub async fn authenticate(state: &AppState, token: &str) -> AppResult<AuthUser> 
            AND s.revoked_at IS NULL
            AND s.expires_at > now()
            AND s.last_seen_at > $2
-           AND u.is_active
-         RETURNING s.id AS session_id, u.id AS user_id, u.email, u.full_name",
+           AND u.status = 'active'
+         RETURNING s.id AS session_id, u.id AS user_id, u.business_id, u.email, u.full_name",
     )
     .bind(hash_token(token))
     .bind(idle_cutoff)
@@ -252,10 +322,10 @@ pub async fn logout(state: &AppState, user: &AuthUser) -> AppResult<()> {
         .bind(user.session_id)
         .execute(&mut *tx)
         .await?;
-    AuditEntry::new("auth.logout", "session")
+    AuditEntry::new(user.business_id, AuditAction::Logout)
         .actor(user.user_id)
-        .entity(user.session_id)
-        .record(&mut *tx)
+        .record(RecordType::User, user.user_id)
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(())
@@ -264,11 +334,11 @@ pub async fn logout(state: &AppState, user: &AuthUser) -> AppResult<()> {
 pub async fn logout_all(state: &AppState, user: &AuthUser) -> AppResult<u64> {
     let mut tx = state.pool.begin().await?;
     let revoked = revoke_sessions(&mut *tx, user.user_id, None).await?;
-    AuditEntry::new("auth.logout_all", "user")
+    AuditEntry::new(user.business_id, AuditAction::Logout)
         .actor(user.user_id)
-        .entity(user.user_id)
-        .metadata(json!({ "sessions_revoked": revoked }))
-        .record(&mut *tx)
+        .record(RecordType::User, user.user_id)
+        .details(format!("all sessions revoked ({revoked})"))
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(revoked)
@@ -277,7 +347,7 @@ pub async fn logout_all(state: &AppState, user: &AuthUser) -> AppResult<u64> {
 /// Revokes every active session of a user, optionally keeping one.
 pub async fn revoke_sessions(
     executor: impl PgExecutor<'_>,
-    user_id: Uuid,
+    user_id: UserId,
     except_session: Option<Uuid>,
 ) -> AppResult<u64> {
     let result = sqlx::query(
@@ -312,24 +382,30 @@ pub async fn change_password(
     );
     v.finish()?;
 
-    let user = get_user(&state.pool, auth.user_id).await?;
-    if !verify_password_async(input.current_password, user.password_hash).await? {
+    let current_hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM user_credentials WHERE user_id = $1")
+            .bind(auth.user_id)
+            .fetch_one(&state.pool)
+            .await?;
+    if !verify_password_async(input.current_password, current_hash).await? {
         return Err(AppError::field("current_password", "is incorrect"));
     }
     let new_hash = hash_password_async(input.new_password).await?;
 
     let mut tx = state.pool.begin().await?;
-    sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
-        .bind(auth.user_id)
-        .bind(new_hash)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE user_credentials SET password_hash = $2, updated_at = now() WHERE user_id = $1",
+    )
+    .bind(auth.user_id)
+    .bind(new_hash)
+    .execute(&mut *tx)
+    .await?;
     let revoked = revoke_sessions(&mut *tx, auth.user_id, Some(auth.session_id)).await?;
-    AuditEntry::new("auth.password_changed", "user")
+    AuditEntry::new(auth.business_id, AuditAction::PasswordChanged)
         .actor(auth.user_id)
-        .entity(auth.user_id)
-        .metadata(json!({ "other_sessions_revoked": revoked }))
-        .record(&mut *tx)
+        .record(RecordType::User, auth.user_id)
+        .details(format!("other sessions revoked: {revoked}"))
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(())
@@ -340,8 +416,8 @@ pub async fn change_password(
 /// way so the endpoint does not reveal which emails exist.
 pub async fn request_password_reset(state: &AppState, email: &str) -> AppResult<Option<String>> {
     let email = normalize_email(email);
-    let user: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM users WHERE lower(email) = $1 AND is_active")
+    let user: Option<(UserId,)> =
+        sqlx::query_as("SELECT id FROM users WHERE lower(email) = $1 AND status = 'active'")
             .bind(&email)
             .fetch_optional(&state.pool)
             .await?;
@@ -362,17 +438,12 @@ pub async fn request_password_reset(state: &AppState, email: &str) -> AppResult<
         "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at)
          VALUES ($1, $2, $3, $4)",
     )
-    .bind(Uuid::new_v4())
+    .bind(Uuid::now_v7())
     .bind(user_id)
     .bind(hash_token(&token))
     .bind(Utc::now() + state.config.password_reset_ttl)
     .execute(&mut *tx)
     .await?;
-    AuditEntry::new("auth.password_reset_requested", "user")
-        .actor(user_id)
-        .entity(user_id)
-        .record(&mut *tx)
-        .await?;
     tx.commit().await?;
     Ok(Some(token))
 }
@@ -392,15 +463,17 @@ pub async fn reset_password(state: &AppState, input: ResetPasswordInput) -> AppR
     let new_hash = hash_password_async(input.new_password).await?;
 
     let mut tx = state.pool.begin().await?;
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, user_id FROM password_reset_tokens
-         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
-         FOR UPDATE",
+    let row: Option<(Uuid, UserId, BusinessId)> = sqlx::query_as(
+        "SELECT t.id, t.user_id, u.business_id
+         FROM password_reset_tokens t
+         JOIN users u ON u.id = t.user_id
+         WHERE t.token_hash = $1 AND t.used_at IS NULL AND t.expires_at > now()
+         FOR UPDATE OF t",
     )
     .bind(hash_token(input.token.trim()))
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((token_id, user_id)) = row else {
+    let Some((token_id, user_id, business_id)) = row else {
         return Err(AppError::BadRequest(
             "reset token is invalid or has expired".into(),
         ));
@@ -411,66 +484,21 @@ pub async fn reset_password(state: &AppState, input: ResetPasswordInput) -> AppR
         .execute(&mut *tx)
         .await?;
     sqlx::query(
-        "UPDATE users SET password_hash = $2, failed_login_attempts = 0, locked_until = NULL,
-                          updated_at = now()
-         WHERE id = $1",
+        "UPDATE user_credentials
+         SET password_hash = $2, failed_login_attempts = 0, locked_until = NULL, updated_at = now()
+         WHERE user_id = $1",
     )
     .bind(user_id)
     .bind(new_hash)
     .execute(&mut *tx)
     .await?;
     revoke_sessions(&mut *tx, user_id, None).await?;
-    AuditEntry::new("auth.password_reset", "user")
+    AuditEntry::new(business_id, AuditAction::PasswordChanged)
         .actor(user_id)
-        .entity(user_id)
-        .record(&mut *tx)
+        .record(RecordType::User, user_id)
+        .details("password reset via recovery token")
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(())
-}
-
-/// Businesses the user belongs to and their roles in each.
-pub async fn memberships(pool: &PgPool, user_id: Uuid) -> AppResult<Vec<Membership>> {
-    let businesses: Vec<(Uuid, String, Option<BusinessRole>)> = sqlx::query_as(
-        "SELECT b.id, b.trading_name, bm.business_role
-         FROM business_members bm
-         JOIN businesses b ON b.id = bm.business_id
-         WHERE bm.user_id = $1 AND bm.is_active
-         ORDER BY b.trading_name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-
-    let assignments: Vec<(Uuid, Uuid, String, String, StoreRole)> = sqlx::query_as(
-        "SELECT s.business_id, sa.store_id, s.name, s.code, sa.role
-         FROM store_assignments sa
-         JOIN stores s ON s.id = sa.store_id
-         WHERE sa.user_id = $1
-         ORDER BY s.name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(businesses
-        .into_iter()
-        .map(|(business_id, business_name, business_role)| Membership {
-            business_id,
-            business_name,
-            business_role,
-            stores: assignments
-                .iter()
-                .filter(|a| a.0 == business_id)
-                .map(
-                    |(_, store_id, store_name, store_code, role)| StoreAssignment {
-                        store_id: *store_id,
-                        store_name: store_name.clone(),
-                        store_code: store_code.clone(),
-                        role: *role,
-                    },
-                )
-                .collect(),
-        })
-        .collect())
 }

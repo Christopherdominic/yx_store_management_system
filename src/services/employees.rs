@@ -1,4 +1,8 @@
-//! Employee accounts, business roles, and store assignments (FR-05).
+//! Employee accounts and role assignments (FR-05).
+//!
+//! Roles are [`RoleAssignment`](crate::models::RoleAssignment) rows: a
+//! business-wide role has no store, a store role names one. Changing a role
+//! revokes the old assignment and inserts a new one, so history is kept.
 //!
 //! Rules beyond the permission table:
 //! - Only a business owner may grant/revoke the owner or administrator role,
@@ -8,39 +12,38 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{FromRow, PgConnection, PgPool};
-use uuid::Uuid;
+use sqlx::{PgConnection, PgPool};
 
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        roles::{BusinessRole, Permission, StoreRole},
-        user::{Employee, StoreAssignment},
+        AuditAction, BusinessId, Employee, EmployeeStoreRole, Permission, RecordType, Role,
+        StoreId, User, UserId, UserStatus,
     },
-    services::{access::Access, audit::AuditEntry, auth},
+    services::{
+        access::Access,
+        audit::AuditEntry,
+        auth::{self, NewUser},
+    },
     utils::{
         crypto::hash_password_async,
-        validation::{Validator, clean, clean_opt, like_pattern, normalize_email, patch_opt},
+        validation::{Validator, clean, like_pattern, patch_opt},
     },
 };
 
 #[derive(Debug, Deserialize)]
 pub struct StoreRoleInput {
-    pub store_id: Uuid,
-    pub role: StoreRole,
+    pub store_id: StoreId,
+    pub role: Role,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEmployee {
-    pub full_name: String,
-    pub email: String,
-    pub phone: Option<String>,
-    /// Initial password set by the administrator and shared with the employee.
-    pub password: String,
-    pub business_role: Option<BusinessRole>,
+    #[serde(flatten)]
+    pub user: NewUser,
+    pub business_role: Option<Role>,
     #[serde(default)]
     pub stores: Vec<StoreRoleInput>,
 }
@@ -54,110 +57,127 @@ pub struct UpdateEmployee {
 #[derive(Debug, Deserialize)]
 pub struct SetBusinessRole {
     /// `null` removes the business-wide role.
-    pub role: Option<BusinessRole>,
+    pub role: Option<Role>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AssignStore {
-    pub role: StoreRole,
+    pub role: Role,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct EmployeeFilter {
     /// Matches name or email (partial).
     pub q: Option<String>,
-    pub store_id: Option<Uuid>,
-    pub is_active: Option<bool>,
+    pub store_id: Option<StoreId>,
+    pub status: Option<UserStatus>,
 }
 
-#[derive(Debug, FromRow)]
-struct EmployeeRow {
-    user_id: Uuid,
-    business_id: Uuid,
-    email: String,
-    full_name: String,
-    phone: Option<String>,
-    business_role: Option<BusinessRole>,
-    is_active: bool,
-    created_at: DateTime<Utc>,
-}
-
-async fn load_row(
+async fn load_user(
     conn: &mut PgConnection,
-    business_id: Uuid,
-    user_id: Uuid,
-) -> AppResult<EmployeeRow> {
-    sqlx::query_as::<_, EmployeeRow>(
-        "SELECT u.id AS user_id, bm.business_id, u.email, u.full_name, u.phone,
-                bm.business_role, bm.is_active, u.created_at
-         FROM business_members bm
-         JOIN users u ON u.id = bm.user_id
-         WHERE bm.business_id = $1 AND bm.user_id = $2
-         FOR UPDATE OF bm",
-    )
-    .bind(business_id)
-    .bind(user_id)
-    .fetch_optional(conn)
-    .await?
-    .ok_or(AppError::NotFound("employee"))
+    business_id: BusinessId,
+    user_id: UserId,
+    for_update: bool,
+) -> AppResult<User> {
+    let query = if for_update {
+        "SELECT * FROM users WHERE id = $1 AND business_id = $2 FOR UPDATE"
+    } else {
+        "SELECT * FROM users WHERE id = $1 AND business_id = $2"
+    };
+    sqlx::query_as::<_, User>(query)
+        .bind(user_id)
+        .bind(business_id)
+        .fetch_optional(conn)
+        .await?
+        .ok_or(AppError::NotFound("employee"))
 }
 
-async fn with_assignments(
+async fn with_roles(
     conn: &mut PgConnection,
-    business_id: Uuid,
-    rows: Vec<EmployeeRow>,
+    business_id: BusinessId,
+    users: Vec<User>,
 ) -> AppResult<Vec<Employee>> {
-    let ids: Vec<Uuid> = rows.iter().map(|r| r.user_id).collect();
-    let assignments: Vec<(Uuid, Uuid, String, String, StoreRole)> = sqlx::query_as(
-        "SELECT sa.user_id, sa.store_id, s.name, s.code, sa.role
-         FROM store_assignments sa
-         JOIN stores s ON s.id = sa.store_id
-         WHERE s.business_id = $1 AND sa.user_id = ANY($2)
-         ORDER BY s.name",
+    let ids: Vec<UserId> = users.iter().map(|u| u.id).collect();
+    let business_roles: Vec<(UserId, Role)> = sqlx::query_as(
+        "SELECT user_id, role FROM role_assignments
+         WHERE business_id = $1 AND user_id = ANY($2) AND store_id IS NULL AND revoked_at IS NULL",
     )
     .bind(business_id)
     .bind(&ids)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
+    .await?;
+    let store_roles: Vec<(
+        UserId,
+        StoreId,
+        String,
+        String,
+        Role,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT ra.user_id, ra.store_id, s.name, s.code, ra.role, ra.assigned_at
+             FROM role_assignments ra
+             JOIN stores s ON s.id = ra.store_id
+             WHERE ra.business_id = $1 AND ra.user_id = ANY($2) AND ra.revoked_at IS NULL
+             ORDER BY s.name",
+    )
+    .bind(business_id)
+    .bind(&ids)
+    .fetch_all(&mut *conn)
     .await?;
 
-    Ok(rows
+    Ok(users
         .into_iter()
-        .map(|r| Employee {
-            stores: assignments
+        .map(|user| Employee {
+            business_role: business_roles
                 .iter()
-                .filter(|a| a.0 == r.user_id)
-                .map(|(_, store_id, name, code, role)| StoreAssignment {
-                    store_id: *store_id,
-                    store_name: name.clone(),
-                    store_code: code.clone(),
-                    role: *role,
-                })
+                .find(|(id, _)| *id == user.id)
+                .map(|(_, role)| *role),
+            stores: store_roles
+                .iter()
+                .filter(|r| r.0 == user.id)
+                .map(
+                    |(_, store_id, name, code, role, assigned_at)| EmployeeStoreRole {
+                        store_id: *store_id,
+                        store_name: name.clone(),
+                        store_code: code.clone(),
+                        role: *role,
+                        assigned_at: *assigned_at,
+                    },
+                )
                 .collect(),
-            user_id: r.user_id,
-            business_id: r.business_id,
-            email: r.email,
-            full_name: r.full_name,
-            phone: r.phone,
-            business_role: r.business_role,
-            is_active: r.is_active,
-            created_at: r.created_at,
+            user,
         })
         .collect())
 }
 
-async fn employee(
+pub async fn load(
     conn: &mut PgConnection,
-    business_id: Uuid,
-    user_id: Uuid,
+    business_id: BusinessId,
+    user_id: UserId,
 ) -> AppResult<Employee> {
-    let row = load_row(conn, business_id, user_id).await?;
-    let mut list = with_assignments(conn, business_id, vec![row]).await?;
-    Ok(list.remove(0))
+    let user = load_user(conn, business_id, user_id, false).await?;
+    Ok(with_roles(conn, business_id, vec![user]).await?.remove(0))
+}
+
+async fn active_business_role(conn: &mut PgConnection, user_id: UserId) -> AppResult<Option<Role>> {
+    Ok(sqlx::query_scalar(
+        "SELECT role FROM role_assignments
+         WHERE user_id = $1 AND store_id IS NULL AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// Holders of a business-wide role can only be changed by an owner.
-fn ensure_can_modify(access: &Access, target: &EmployeeRow) -> AppResult<()> {
-    if target.business_role.is_some() && !access.can(Permission::BusinessRoleManage, None) {
+async fn ensure_can_modify(
+    conn: &mut PgConnection,
+    access: &Access,
+    target: UserId,
+) -> AppResult<()> {
+    if active_business_role(conn, target).await?.is_some()
+        && !access.can(Permission::BusinessRoleManage, None)
+    {
         return Err(AppError::Forbidden);
     }
     Ok(())
@@ -165,8 +185,8 @@ fn ensure_can_modify(access: &Access, target: &EmployeeRow) -> AppResult<()> {
 
 async fn ensure_stores_in_business(
     conn: &mut PgConnection,
-    business_id: Uuid,
-    store_ids: &[Uuid],
+    business_id: BusinessId,
+    store_ids: &[StoreId],
 ) -> AppResult<()> {
     let found: i64 =
         sqlx::query_scalar("SELECT count(*) FROM stores WHERE business_id = $1 AND id = ANY($2)")
@@ -183,21 +203,50 @@ async fn ensure_stores_in_business(
     Ok(())
 }
 
+/// Locks the active owners of a business and errors if `user_id` is the
+/// only one.
+async fn ensure_other_owner(
+    conn: &mut PgConnection,
+    business_id: BusinessId,
+    user_id: UserId,
+) -> AppResult<()> {
+    let owners: Vec<UserId> = sqlx::query_scalar(
+        "SELECT ra.user_id FROM role_assignments ra
+         JOIN users u ON u.id = ra.user_id
+         WHERE ra.business_id = $1 AND ra.role = 'business_owner' AND ra.revoked_at IS NULL
+           AND u.status = 'active'
+         FOR UPDATE OF ra",
+    )
+    .bind(business_id)
+    .fetch_all(conn)
+    .await?;
+    if !owners.iter().any(|id| *id != user_id) {
+        return Err(AppError::Conflict(
+            "a business must keep at least one active owner".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create(pool: &PgPool, access: &Access, input: CreateEmployee) -> AppResult<Employee> {
     if input.business_role.is_some() && !access.can(Permission::BusinessRoleManage, None) {
         return Err(AppError::Forbidden);
     }
-    let full_name = clean(input.full_name);
-    let email = normalize_email(&input.email);
-    let phone = clean_opt(input.phone);
-    let store_ids: Vec<Uuid> = input.stores.iter().map(|s| s.store_id).collect();
+    let user = input.user.clean();
+    let store_ids: Vec<StoreId> = input.stores.iter().map(|s| s.store_id).collect();
 
     let mut v = Validator::new();
-    v.required("full_name", &full_name, 200);
-    v.required("email", &email, 254);
-    v.email("email", Some(&email));
-    v.optional("phone", phone.as_deref(), 30);
-    v.password("password", &input.password);
+    user.validate(&mut v, "");
+    v.check(
+        input.business_role.is_none_or(Role::is_business_wide),
+        "business_role",
+        "must be business_owner or administrator",
+    );
+    v.check(
+        input.stores.iter().all(|s| !s.role.is_business_wide()),
+        "stores",
+        "store roles must be store_manager, cashier, inventory_officer, or finance_officer",
+    );
     v.check(
         store_ids.iter().collect::<HashSet<_>>().len() == store_ids.len(),
         "stores",
@@ -205,50 +254,36 @@ pub async fn create(pool: &PgPool, access: &Access, input: CreateEmployee) -> Ap
     );
     v.finish()?;
 
-    let password_hash = hash_password_async(input.password).await?;
+    let password_hash = hash_password_async(user.password.clone()).await?;
     let business_id = access.business_id;
     let actor = access.user_id;
 
     let mut tx = pool.begin().await?;
     ensure_stores_in_business(&mut tx, business_id, &store_ids).await?;
-    let user = auth::insert_user(
-        &mut *tx,
-        &full_name,
-        &email,
-        phone.as_deref(),
-        &password_hash,
-        Some(actor),
-    )
-    .await?;
-    sqlx::query(
-        "INSERT INTO business_members (business_id, user_id, business_role) VALUES ($1, $2, $3)",
-    )
-    .bind(business_id)
-    .bind(user.id)
-    .bind(input.business_role)
-    .execute(&mut *tx)
-    .await?;
+    let created = auth::insert_user(&mut tx, business_id, &user, &password_hash).await?;
+    if let Some(role) = input.business_role {
+        auth::insert_role(&mut tx, business_id, created.id, None, role, actor).await?;
+    }
     for assignment in &input.stores {
-        sqlx::query(
-            "INSERT INTO store_assignments (store_id, user_id, role, created_by) VALUES ($1, $2, $3, $4)",
+        auth::insert_role(
+            &mut tx,
+            business_id,
+            created.id,
+            Some(assignment.store_id),
+            assignment.role,
+            actor,
         )
-        .bind(assignment.store_id)
-        .bind(user.id)
-        .bind(assignment.role)
-        .bind(actor)
-        .execute(&mut *tx)
         .await?;
     }
-    let created = employee(&mut tx, business_id, user.id).await?;
-    AuditEntry::new("employee.created", "user")
-        .business(business_id)
+    let employee = load(&mut tx, business_id, created.id).await?;
+    AuditEntry::new(business_id, AuditAction::Created)
         .actor(actor)
-        .entity(user.id)
-        .after(&created)
-        .record(&mut *tx)
+        .record(RecordType::User, created.id)
+        .after(&employee)
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(created)
+    Ok(employee)
 }
 
 /// Lists employees. Without a business-wide role the caller only sees
@@ -264,48 +299,32 @@ pub async fn list(
         .map(|q| q.trim().to_string())
         .filter(|q| !q.is_empty());
     let mut conn = pool.acquire().await?;
-    let rows = sqlx::query_as::<_, EmployeeRow>(
-        "SELECT u.id AS user_id, bm.business_id, u.email, u.full_name, u.phone,
-                bm.business_role, bm.is_active, u.created_at
-         FROM business_members bm
-         JOIN users u ON u.id = bm.user_id
-         WHERE bm.business_id = $1
+    let users = sqlx::query_as::<_, User>(
+        "SELECT * FROM users u
+         WHERE u.business_id = $1
            AND ($2::uuid[] IS NULL OR EXISTS (
-                SELECT 1 FROM store_assignments sa WHERE sa.user_id = u.id AND sa.store_id = ANY($2)))
+                SELECT 1 FROM role_assignments ra
+                WHERE ra.user_id = u.id AND ra.revoked_at IS NULL AND ra.store_id = ANY($2)))
            AND ($3::text IS NULL OR u.full_name ILIKE $3 OR u.email ILIKE $3)
            AND ($4::uuid IS NULL OR EXISTS (
-                SELECT 1 FROM store_assignments sa WHERE sa.user_id = u.id AND sa.store_id = $4))
-           AND ($5::boolean IS NULL OR bm.is_active = $5)
+                SELECT 1 FROM role_assignments ra
+                WHERE ra.user_id = u.id AND ra.revoked_at IS NULL AND ra.store_id = $4))
+           AND ($5::text IS NULL OR u.status = $5)
          ORDER BY u.full_name",
     )
     .bind(access.business_id)
-        .bind(visible)
-        .bind(term.as_deref().map(like_pattern))
-        .bind(filter.store_id)
-        .bind(filter.is_active)
-        .fetch_all(&mut *conn)
-        .await?;
-    with_assignments(&mut conn, access.business_id, rows).await
+    .bind(visible)
+    .bind(term.as_deref().map(like_pattern))
+    .bind(filter.store_id)
+    .bind(filter.status)
+    .fetch_all(&mut *conn)
+    .await?;
+    with_roles(&mut conn, access.business_id, users).await
 }
 
-pub async fn get(pool: &PgPool, access: &Access, user_id: Uuid) -> AppResult<Employee> {
+pub async fn get(pool: &PgPool, access: &Access, user_id: UserId) -> AppResult<Employee> {
     let mut conn = pool.acquire().await?;
-    let row: EmployeeRow = sqlx::query_as(
-        "SELECT u.id AS user_id, bm.business_id, u.email, u.full_name, u.phone,
-                bm.business_role, bm.is_active, u.created_at
-         FROM business_members bm
-         JOIN users u ON u.id = bm.user_id
-         WHERE bm.business_id = $1 AND bm.user_id = $2",
-    )
-    .bind(access.business_id)
-    .bind(user_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .ok_or(AppError::NotFound("employee"))?;
-    let employee = with_assignments(&mut conn, access.business_id, vec![row])
-        .await?
-        .remove(0);
-
+    let employee = load(&mut conn, access.business_id, user_id).await?;
     if let Some(visible) = access.stores_with(Permission::EmployeeView)
         && user_id != access.user_id
         && !employee
@@ -321,13 +340,13 @@ pub async fn get(pool: &PgPool, access: &Access, user_id: Uuid) -> AppResult<Emp
 pub async fn update(
     pool: &PgPool,
     access: &Access,
-    user_id: Uuid,
+    user_id: UserId,
     input: UpdateEmployee,
 ) -> AppResult<Employee> {
     let mut tx = pool.begin().await?;
-    let target = load_row(&mut tx, access.business_id, user_id).await?;
-    ensure_can_modify(access, &target)?;
-    let before = employee(&mut tx, access.business_id, user_id).await?;
+    let target = load_user(&mut tx, access.business_id, user_id, true).await?;
+    ensure_can_modify(&mut tx, access, user_id).await?;
+    let before = load(&mut tx, access.business_id, user_id).await?;
 
     let full_name = input.full_name.map(clean).unwrap_or(target.full_name);
     let phone = patch_opt(target.phone, input.phone);
@@ -342,134 +361,117 @@ pub async fn update(
         .bind(&phone)
         .execute(&mut *tx)
         .await?;
-    let after = employee(&mut tx, access.business_id, user_id).await?;
-    AuditEntry::new("employee.updated", "user")
-        .business(access.business_id)
+    let after = load(&mut tx, access.business_id, user_id).await?;
+    AuditEntry::new(access.business_id, AuditAction::Updated)
         .actor(access.user_id)
-        .entity(user_id)
+        .record(RecordType::User, user_id)
         .before(&before)
         .after(&after)
-        .record(&mut *tx)
+        .record_in(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(after)
 }
 
-/// Locks the active owners of a business and errors if `user_id` is the
-/// only one.
-async fn ensure_other_owner(
-    conn: &mut PgConnection,
-    business_id: Uuid,
-    user_id: Uuid,
-) -> AppResult<()> {
-    let owners: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM business_members
-         WHERE business_id = $1 AND business_role = 'business_owner' AND is_active
-         FOR UPDATE",
-    )
-    .bind(business_id)
-    .fetch_all(conn)
-    .await?;
-    if !owners.iter().any(|id| *id != user_id) {
-        return Err(AppError::Conflict(
-            "a business must keep at least one active owner".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Deactivates the employee in this business and signs them out everywhere.
-pub async fn set_active(
+/// Deactivating also signs the employee out everywhere.
+pub async fn set_status(
     pool: &PgPool,
     access: &Access,
-    user_id: Uuid,
-    active: bool,
+    user_id: UserId,
+    status: UserStatus,
 ) -> AppResult<Employee> {
-    if !active && user_id == access.user_id {
+    if status == UserStatus::Deactivated && user_id == access.user_id {
         return Err(AppError::Conflict(
             "you cannot deactivate your own account".into(),
         ));
     }
     let mut tx = pool.begin().await?;
-    let target = load_row(&mut tx, access.business_id, user_id).await?;
-    ensure_can_modify(access, &target)?;
-    if target.is_active == active {
-        drop(tx);
-        return get(pool, access, user_id).await;
+    let target = load_user(&mut tx, access.business_id, user_id, true).await?;
+    ensure_can_modify(&mut tx, access, user_id).await?;
+    if target.status == status {
+        return load(&mut tx, access.business_id, user_id).await;
     }
-    if !active && target.business_role == Some(BusinessRole::BusinessOwner) {
+    if status == UserStatus::Deactivated
+        && active_business_role(&mut tx, user_id).await? == Some(Role::BusinessOwner)
+    {
         ensure_other_owner(&mut tx, access.business_id, user_id).await?;
     }
 
-    sqlx::query(
-        "UPDATE business_members SET is_active = $3, updated_at = now()
-         WHERE business_id = $1 AND user_id = $2",
-    )
-    .bind(access.business_id)
-    .bind(user_id)
-    .bind(active)
-    .execute(&mut *tx)
-    .await?;
-    let revoked = if active {
-        0
-    } else {
-        auth::revoke_sessions(&mut *tx, user_id, None).await?
-    };
-    let action = if active {
-        "employee.reactivated"
-    } else {
-        "employee.deactivated"
-    };
-    AuditEntry::new(action, "user")
-        .business(access.business_id)
-        .actor(access.user_id)
-        .entity(user_id)
-        .before(&json!({ "is_active": target.is_active }))
-        .after(&json!({ "is_active": active }))
-        .metadata(json!({ "sessions_revoked": revoked }))
-        .record(&mut *tx)
+    sqlx::query("UPDATE users SET status = $2, updated_at = now() WHERE id = $1")
+        .bind(user_id)
+        .bind(status)
+        .execute(&mut *tx)
         .await?;
-    let updated = employee(&mut tx, access.business_id, user_id).await?;
+    let (action, revoked) = match status {
+        UserStatus::Active => (AuditAction::Reactivated, 0),
+        UserStatus::Deactivated => (
+            AuditAction::Deactivated,
+            auth::revoke_sessions(&mut *tx, user_id, None).await?,
+        ),
+    };
+    AuditEntry::new(access.business_id, action)
+        .actor(access.user_id)
+        .record(RecordType::User, user_id)
+        .before(&json!({ "status": target.status }))
+        .after(&json!({ "status": status }))
+        .details(format!("sessions revoked: {revoked}"))
+        .record_in(&mut *tx)
+        .await?;
+    let updated = load(&mut tx, access.business_id, user_id).await?;
     tx.commit().await?;
     Ok(updated)
 }
 
-/// Grants or removes a business-wide role. Owner only (checked by caller via
-/// `BusinessRoleManage`).
+/// Grants, changes, or removes the business-wide role. Owner only (checked by
+/// the caller via `BusinessRoleManage`).
 pub async fn set_business_role(
     pool: &PgPool,
     access: &Access,
-    user_id: Uuid,
+    user_id: UserId,
     input: SetBusinessRole,
 ) -> AppResult<Employee> {
-    let mut tx = pool.begin().await?;
-    let target = load_row(&mut tx, access.business_id, user_id).await?;
-    if target.business_role == input.role {
-        drop(tx);
-        return get(pool, access, user_id).await;
+    if input.role.is_some_and(|role| !role.is_business_wide()) {
+        return Err(AppError::field(
+            "role",
+            "must be business_owner, administrator, or null",
+        ));
     }
-    if target.business_role == Some(BusinessRole::BusinessOwner) {
+    let mut tx = pool.begin().await?;
+    load_user(&mut tx, access.business_id, user_id, true).await?;
+    let current = active_business_role(&mut tx, user_id).await?;
+    if current == input.role {
+        return load(&mut tx, access.business_id, user_id).await;
+    }
+    if current == Some(Role::BusinessOwner) {
         ensure_other_owner(&mut tx, access.business_id, user_id).await?;
     }
 
     sqlx::query(
-        "UPDATE business_members SET business_role = $3, updated_at = now()
-         WHERE business_id = $1 AND user_id = $2",
+        "UPDATE role_assignments SET revoked_at = now()
+         WHERE user_id = $1 AND store_id IS NULL AND revoked_at IS NULL",
     )
-    .bind(access.business_id)
     .bind(user_id)
-    .bind(input.role)
     .execute(&mut *tx)
     .await?;
-    AuditEntry::new("employee.business_role_changed", "user")
-        .business(access.business_id)
-        .actor(access.user_id)
-        .entity(user_id)
-        .before(&json!({ "business_role": target.business_role }))
-        .after(&json!({ "business_role": input.role }))
-        .record(&mut *tx)
+    if let Some(role) = input.role {
+        auth::insert_role(
+            &mut tx,
+            access.business_id,
+            user_id,
+            None,
+            role,
+            access.user_id,
+        )
         .await?;
-    let updated = employee(&mut tx, access.business_id, user_id).await?;
+    }
+    AuditEntry::new(access.business_id, AuditAction::PermissionChanged)
+        .actor(access.user_id)
+        .record(RecordType::User, user_id)
+        .before(&json!({ "business_role": current }))
+        .after(&json!({ "business_role": input.role }))
+        .record_in(&mut *tx)
+        .await?;
+    let updated = load(&mut tx, access.business_id, user_id).await?;
     tx.commit().await?;
     Ok(updated)
 }
@@ -478,43 +480,48 @@ pub async fn set_business_role(
 pub async fn assign_store(
     pool: &PgPool,
     access: &Access,
-    user_id: Uuid,
-    store_id: Uuid,
+    user_id: UserId,
+    store_id: StoreId,
     input: AssignStore,
 ) -> AppResult<Employee> {
+    if input.role.is_business_wide() {
+        return Err(AppError::field(
+            "role",
+            "must be store_manager, cashier, inventory_officer, or finance_officer",
+        ));
+    }
     let mut tx = pool.begin().await?;
-    let target = load_row(&mut tx, access.business_id, user_id).await?;
-    ensure_can_modify(access, &target)?;
+    load_user(&mut tx, access.business_id, user_id, true).await?;
+    ensure_can_modify(&mut tx, access, user_id).await?;
     ensure_stores_in_business(&mut tx, access.business_id, &[store_id]).await?;
 
-    let previous: Option<StoreRole> = sqlx::query_scalar(
-        "SELECT role FROM store_assignments WHERE store_id = $1 AND user_id = $2",
+    let previous: Option<Role> = sqlx::query_scalar(
+        "UPDATE role_assignments SET revoked_at = now()
+         WHERE user_id = $1 AND store_id = $2 AND revoked_at IS NULL
+         RETURNING role",
     )
-    .bind(store_id)
     .bind(user_id)
+    .bind(store_id)
     .fetch_optional(&mut *tx)
     .await?;
-    sqlx::query(
-        "INSERT INTO store_assignments (store_id, user_id, role, created_by)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (store_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+    auth::insert_role(
+        &mut tx,
+        access.business_id,
+        user_id,
+        Some(store_id),
+        input.role,
+        access.user_id,
     )
-    .bind(store_id)
-    .bind(user_id)
-    .bind(input.role)
-    .bind(access.user_id)
-    .execute(&mut *tx)
     .await?;
-    AuditEntry::new("employee.store_assigned", "user")
-        .business(access.business_id)
+    AuditEntry::new(access.business_id, AuditAction::PermissionChanged)
         .store(Some(store_id))
         .actor(access.user_id)
-        .entity(user_id)
+        .record(RecordType::User, user_id)
         .before(&json!({ "role": previous }))
         .after(&json!({ "role": input.role }))
-        .record(&mut *tx)
+        .record_in(&mut *tx)
         .await?;
-    let updated = employee(&mut tx, access.business_id, user_id).await?;
+    let updated = load(&mut tx, access.business_id, user_id).await?;
     tx.commit().await?;
     Ok(updated)
 }
@@ -522,36 +529,35 @@ pub async fn assign_store(
 pub async fn unassign_store(
     pool: &PgPool,
     access: &Access,
-    user_id: Uuid,
-    store_id: Uuid,
+    user_id: UserId,
+    store_id: StoreId,
 ) -> AppResult<Employee> {
     let mut tx = pool.begin().await?;
-    let target = load_row(&mut tx, access.business_id, user_id).await?;
-    ensure_can_modify(access, &target)?;
+    load_user(&mut tx, access.business_id, user_id, true).await?;
+    ensure_can_modify(&mut tx, access, user_id).await?;
 
-    let removed: Option<StoreRole> = sqlx::query_scalar(
-        "DELETE FROM store_assignments sa
-         USING stores s
-         WHERE sa.store_id = s.id AND s.business_id = $1 AND sa.store_id = $2 AND sa.user_id = $3
-         RETURNING sa.role",
+    let removed: Option<Role> = sqlx::query_scalar(
+        "UPDATE role_assignments SET revoked_at = now()
+         WHERE business_id = $1 AND user_id = $2 AND store_id = $3 AND revoked_at IS NULL
+         RETURNING role",
     )
     .bind(access.business_id)
-    .bind(store_id)
     .bind(user_id)
+    .bind(store_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(removed) = removed else {
         return Err(AppError::NotFound("store assignment"));
     };
-    AuditEntry::new("employee.store_unassigned", "user")
-        .business(access.business_id)
+    AuditEntry::new(access.business_id, AuditAction::PermissionChanged)
         .store(Some(store_id))
         .actor(access.user_id)
-        .entity(user_id)
+        .record(RecordType::User, user_id)
         .before(&json!({ "role": removed }))
-        .record(&mut *tx)
+        .after(&json!({ "role": null }))
+        .record_in(&mut *tx)
         .await?;
-    let updated = employee(&mut tx, access.business_id, user_id).await?;
+    let updated = load(&mut tx, access.business_id, user_id).await?;
     tx.commit().await?;
     Ok(updated)
 }

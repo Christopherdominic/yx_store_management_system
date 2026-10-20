@@ -14,6 +14,10 @@ use xy_store::{config::Config, state::AppState};
 
 const PASSWORD: &str = "Passw0rd!";
 
+fn address(city: &str) -> Value {
+    json!({ "line1": format!("1 Main Rd, {city}"), "city": city, "country": "NG" })
+}
+
 struct TestApp {
     router: Router,
 }
@@ -84,30 +88,26 @@ impl TestApp {
         body["token"].as_str().unwrap().to_string()
     }
 
-    /// Registers an owner and returns their token.
-    async fn owner(&self, email: &str) -> String {
+    /// Registers a business with its owner; returns (owner token, business id).
+    async fn register(&self, email: &str, name: &str) -> (String, String) {
         let (status, body) = self
             .call(
                 Method::POST,
                 "/auth/register",
                 None,
-                Some(json!({ "full_name": "Owner", "email": email, "password": PASSWORD })),
+                Some(json!({
+                    "business": {
+                        "legal_name": format!("{name} Ltd"),
+                        "trading_name": name,
+                        "address": address("Lagos"),
+                    },
+                    "owner": { "full_name": "Owner", "email": email, "password": PASSWORD },
+                })),
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
-        self.token(email).await
-    }
-
-    async fn business(&self, token: &str, name: &str) -> String {
-        let (status, body) = self
-            .post(
-                "/businesses",
-                token,
-                json!({ "legal_name": format!("{name} Ltd"), "trading_name": name, "address": "1 Broad St, Lagos" }),
-            )
-            .await;
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        body["id"].as_str().unwrap().to_string()
+        let business = body["business"]["id"].as_str().unwrap().to_string();
+        (self.token(email).await, business)
     }
 
     async fn store(&self, token: &str, business: &str, code: &str, name: &str) -> String {
@@ -115,7 +115,7 @@ impl TestApp {
             .post(
                 &format!("/businesses/{business}/stores"),
                 token,
-                json!({ "code": code, "name": name, "address": format!("{name} address") }),
+                json!({ "code": code, "name": name, "address": address(name) }),
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -132,7 +132,7 @@ impl TestApp {
             .post(&format!("/businesses/{business}/employees"), token, payload)
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
-        body["user_id"].as_str().unwrap().to_string()
+        body["id"].as_str().unwrap().to_string()
     }
 }
 
@@ -146,11 +146,10 @@ struct Amiable {
 }
 
 async fn amiable(app: &TestApp) -> Amiable {
-    let owner = app.owner("owner@amiable.ng").await;
-    let business = app.business(&owner, "Amiable Retail").await;
-    let lagos = app.store(&owner, &business, "LAG-01", "Lagos").await;
-    let abuja = app.store(&owner, &business, "ABJ-01", "Abuja").await;
-    let kaduna = app.store(&owner, &business, "KAD-01", "Kaduna").await;
+    let (owner, business) = app.register("owner@amiable.ng", "Amiable Retail").await;
+    let lagos = app.store(&owner, &business, "LAG", "Lagos").await;
+    let abuja = app.store(&owner, &business, "ABJ", "Abuja").await;
+    let kaduna = app.store(&owner, &business, "KAD", "Kaduna").await;
     Amiable {
         owner,
         business,
@@ -170,14 +169,13 @@ async fn login_logout_and_revoked_session(pool: PgPool) {
     let (status, _) = app.get("/auth/me", "not-a-real-token").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let token = app.owner("ada@example.com").await;
+    let (token, business) = app.register("ada@example.com", "Ada Stores").await;
     let (status, me) = app.get("/auth/me", &token).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(me["user"]["email"], "ada@example.com");
-    assert!(
-        me["user"].get("password_hash").is_none(),
-        "hash must never be returned"
-    );
+    assert_eq!(me["employee"]["email"], "ada@example.com");
+    assert_eq!(me["employee"]["business_role"], "business_owner");
+    assert_eq!(me["business"]["id"], business.as_str());
+    assert!(me["employee"]["last_login_at"].is_string());
 
     let (status, _) = app.login("ADA@example.com", "wrong-pass1").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -191,6 +189,44 @@ async fn login_logout_and_revoked_session(pool: PgPool) {
         status,
         StatusCode::UNAUTHORIZED,
         "revoked session must not work"
+    );
+}
+
+// FR-01
+#[sqlx::test]
+async fn registration_is_validated(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let (status, body) = app
+        .call(
+            Method::POST,
+            "/auth/register",
+            None,
+            Some(json!({
+                "business": {
+                    "legal_name": "",
+                    "address": { "line1": "x", "city": "Lagos", "country": "Nigeria" },
+                    "base_currency": "ABC",
+                },
+                "owner": { "full_name": "O", "email": "not-an-email", "password": "short" },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let fields: Vec<&str> = body["error"]["details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "base_currency",
+            "legal_name",
+            "address.country",
+            "owner.email",
+            "owner.password"
+        ]
     );
 }
 
@@ -219,6 +255,7 @@ async fn owner_manages_business_and_three_stores(pool: PgPool) {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], "Lagos Island");
+    assert_eq!(body["contact"]["phone"], "+2348000000000");
 
     let (status, body) = app
         .post(
@@ -265,7 +302,7 @@ async fn owner_manages_business_and_three_stores(pool: PgPool) {
         .post(
             &format!("/businesses/{}/stores", a.business),
             &a.owner,
-            json!({ "code": "lag-01", "name": "Dup", "address": "x" }),
+            json!({ "code": "lag", "name": "Dup", "address": address("Ikeja") }),
         )
         .await;
     assert_eq!(
@@ -278,14 +315,15 @@ async fn owner_manages_business_and_three_stores(pool: PgPool) {
     let (_, logs) = app
         .get(
             &format!(
-                "/businesses/{}/audit-logs?action=business.updated",
-                a.business
+                "/businesses/{}/audit-logs?action=updated&record_id={}",
+                a.business, a.business
             ),
             &a.owner,
         )
         .await;
-    assert_eq!(logs[0]["before_values"]["registration_number"], Value::Null);
-    assert_eq!(logs[0]["after_values"]["registration_number"], "RC123456");
+    assert_eq!(logs[0]["actor"]["type"], "user");
+    assert_eq!(logs[0]["before"]["registration_number"], Value::Null);
+    assert_eq!(logs[0]["after"]["registration_number"], "RC123456");
 }
 
 // FR-01, FR-06
@@ -293,11 +331,11 @@ async fn owner_manages_business_and_three_stores(pool: PgPool) {
 async fn other_business_is_isolated(pool: PgPool) {
     let app = TestApp::new(pool);
     let a = amiable(&app).await;
-    let rival = app.owner("owner@rival.ng").await;
-    app.business(&rival, "Rival").await;
+    let (rival, _) = app.register("owner@rival.ng", "Rival").await;
 
     for uri in [
         format!("/businesses/{}", a.business),
+        format!("/businesses/{}/settings", a.business),
         format!("/businesses/{}/stores", a.business),
         format!("/businesses/{}/stores/{}", a.business, a.lagos),
         format!("/businesses/{}/employees", a.business),
@@ -313,9 +351,6 @@ async fn other_business_is_isolated(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-
-    let (_, mine) = app.get("/businesses", &rival).await;
-    assert_eq!(mine.as_array().unwrap().len(), 1);
 }
 
 // FR-05, FR-06, FR-03
@@ -341,20 +376,17 @@ async fn roles_are_per_store(pool: PgPool) {
         .patch(
             &settings(&a.lagos),
             &ada,
-            json!({ "receipt_prefix": "LAG" }),
+            json!({ "receipt_prefix": "LAGOS" }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["receipt_prefix"], "LAG");
+    assert_eq!(body["receipt_prefix"], "LAGOS");
     // Cashier in Abuja.
-    let (status, _) = app.get(&settings(&a.abuja), &ada).await;
+    let (status, body) = app.get(&settings(&a.abuja), &ada).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["receipt_prefix"], "ABJ", "defaults to the store code");
     let (status, _) = app
-        .patch(
-            &settings(&a.abuja),
-            &ada,
-            json!({ "receipt_prefix": "ABJ" }),
-        )
+        .patch(&settings(&a.abuja), &ada, json!({ "receipt_prefix": "X" }))
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     // Not assigned to Kaduna at all.
@@ -374,12 +406,12 @@ async fn roles_are_per_store(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    // Cannot create staff or stores.
+    // Cannot create stores.
     let (status, _) = app
         .post(
             &format!("/businesses/{}/stores", a.business),
             &ada,
-            json!({ "code": "X", "name": "X", "address": "X" }),
+            json!({ "code": "X", "name": "X", "address": address("X") }),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -439,7 +471,7 @@ async fn lagos_cashier_cannot_reach_abuja_and_attempt_is_logged(pool: PgPool) {
     let (_, logs) = app
         .get(
             &format!(
-                "/businesses/{}/audit-logs?outcome=denied&actor_user_id={bayo_id}",
+                "/businesses/{}/audit-logs?action=access_denied&actor_user_id={bayo_id}",
                 a.business
             ),
             &a.owner,
@@ -448,6 +480,7 @@ async fn lagos_cashier_cannot_reach_abuja_and_attempt_is_logged(pool: PgPool) {
     let logs = logs.as_array().unwrap();
     assert_eq!(logs.len(), 2);
     assert!(logs.iter().all(|l| l["store_id"] == a.abuja.as_str()));
+    assert!(logs.iter().all(|l| l["outcome"] == "denied"));
 
     // Cashiers cannot read the audit trail.
     let (status, _) = app
@@ -467,7 +500,7 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
         .patch(
             &uri,
             &a.owner,
-            json!({ "base_currency": "XYZ", "timezone": "Mars/Base", "tax_rate_bps": 10001 }),
+            json!({ "base_currency": "XYZ", "timezone": "Mars/Base", "tax_rate": "100.5" }),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -477,30 +510,36 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
         .iter()
         .map(|d| d["field"].as_str().unwrap())
         .collect();
-    assert_eq!(fields, ["base_currency", "timezone", "tax_rate_bps"]);
+    assert_eq!(fields, ["base_currency", "timezone", "tax_rate"]);
 
     let (status, body) = app
         .patch(
             &uri,
             &a.owner,
-            json!({ "base_currency": "ngn", "tax_rate_bps": 750, "receipt_footer": "Thank you" }),
+            json!({ "base_currency": "usd", "tax_rate": "7.5", "receipt_footer": "Thank you" }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["base_currency"], "NGN");
-    assert_eq!(body["tax_rate_bps"], 750);
+    assert_eq!(body["base_currency"], "USD");
+    assert_eq!(body["tax_rate"], "7.5000");
+    assert_eq!(body["receipt_footer"], "Thank you");
+
+    let (_, business) = app
+        .get(&format!("/businesses/{}", a.business), &a.owner)
+        .await;
+    assert_eq!(business["base_currency"], "USD");
 
     let (_, logs) = app
         .get(
             &format!(
-                "/businesses/{}/audit-logs?action=business.settings_updated",
+                "/businesses/{}/audit-logs?action=settings_changed",
                 a.business
             ),
             &a.owner,
         )
         .await;
-    assert_eq!(logs[0]["before_values"]["tax_rate_bps"], 0);
-    assert_eq!(logs[0]["after_values"]["tax_rate_bps"], 750);
+    assert_eq!(logs[0]["before"]["tax_rate"], "0");
+    assert_eq!(logs[0]["after"]["tax_rate"], "7.5000");
 
     let (status, _) = app
         .patch(
@@ -516,7 +555,7 @@ async fn settings_are_validated_and_audited(pool: PgPool) {
 #[sqlx::test]
 async fn account_locks_after_five_failed_logins(pool: PgPool) {
     let app = TestApp::new(pool);
-    app.owner("lock@example.com").await;
+    app.register("lock@example.com", "Lock").await;
     for _ in 0..5 {
         let (status, _) = app.login("lock@example.com", "wrong-pass1").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -529,7 +568,7 @@ async fn account_locks_after_five_failed_logins(pool: PgPool) {
 #[sqlx::test]
 async fn password_reset_is_single_use_and_revokes_sessions(pool: PgPool) {
     let app = TestApp::new(pool);
-    let old_session = app.owner("reset@example.com").await;
+    let (old_session, _) = app.register("reset@example.com", "Reset").await;
 
     let (status, body) = app
         .call(
@@ -583,7 +622,7 @@ async fn password_reset_is_single_use_and_revokes_sessions(pool: PgPool) {
 #[sqlx::test]
 async fn change_password_signs_out_other_sessions(pool: PgPool) {
     let app = TestApp::new(pool);
-    let first = app.owner("change@example.com").await;
+    let (first, _) = app.register("change@example.com", "Change").await;
     let second = app.token("change@example.com").await;
 
     let (status, _) = app
@@ -615,7 +654,7 @@ async fn change_password_signs_out_other_sessions(pool: PgPool) {
 async fn employee_lifecycle_and_role_guards(pool: PgPool) {
     let app = TestApp::new(pool);
     let a = amiable(&app).await;
-    let owner_id = app.get("/auth/me", &a.owner).await.1["user"]["id"]
+    let owner_id = app.get("/auth/me", &a.owner).await.1["employee"]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -640,7 +679,7 @@ async fn employee_lifecycle_and_role_guards(pool: PgPool) {
         .await;
     let chidi = app.token("chidi@amiable.ng").await;
 
-    // Public sign-up cannot create staff, and duplicate emails are rejected.
+    // Duplicate emails are rejected.
     let (status, _) = app
         .post(
             &base,
@@ -649,10 +688,25 @@ async fn employee_lifecycle_and_role_guards(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
+    // Store roles cannot be business-wide and vice versa.
+    let (status, _) = app
+        .post(
+            &base,
+            &a.owner,
+            json!({ "full_name": "X", "email": "x@amiable.ng", "password": PASSWORD,
+                    "stores": [{ "store_id": a.lagos, "role": "administrator" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     // Administrators cannot grant business roles or touch the owner.
     let (status, _) = app
-        .post(&base, &admin, json!({ "full_name": "X", "email": "x@amiable.ng", "password": PASSWORD, "business_role": "administrator" }))
+        .post(
+            &base,
+            &admin,
+            json!({ "full_name": "X", "email": "x@amiable.ng", "password": PASSWORD,
+                    "business_role": "administrator" }),
+        )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = app
@@ -660,7 +714,7 @@ async fn employee_lifecycle_and_role_guards(pool: PgPool) {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Reassign Chidi to a different role at another store.
+    // A second store role, then a role change at the first store.
     let (status, body) = app
         .put(
             &format!("{base}/{chidi_id}/stores/{}", a.lagos),
@@ -670,29 +724,41 @@ async fn employee_lifecycle_and_role_guards(pool: PgPool) {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["stores"].as_array().unwrap().len(), 2);
+    let (status, body) = app
+        .put(
+            &format!("{base}/{chidi_id}/stores/{}", a.kaduna),
+            &admin,
+            json!({ "role": "cashier" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kaduna = body["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["store_id"] == a.kaduna.as_str())
+        .unwrap();
+    assert_eq!(kaduna["role"], "cashier");
 
-    // Deactivation revokes sessions and blocks business access.
+    // Deactivation revokes sessions and blocks login and business access.
     let (status, body) = app
         .post(&format!("{base}/{chidi_id}/deactivate"), &admin, json!({}))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["is_active"], false);
+    assert_eq!(body["status"], "deactivated");
     assert_eq!(
         app.get("/auth/me", &chidi).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let chidi = app.token("chidi@amiable.ng").await;
-    let (status, _) = app
-        .get(
-            &format!("/businesses/{}/stores/{}", a.business, a.kaduna),
-            &chidi,
-        )
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        app.login("chidi@amiable.ng", PASSWORD).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     let (status, _) = app
         .post(&format!("{base}/{chidi_id}/reactivate"), &admin, json!({}))
         .await;
     assert_eq!(status, StatusCode::OK);
+    let chidi = app.token("chidi@amiable.ng").await;
     let (status, _) = app
         .get(
             &format!("/businesses/{}/stores/{}", a.business, a.kaduna),
@@ -734,6 +800,7 @@ async fn employee_lifecycle_and_role_guards(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["business_role"], Value::Null);
     assert_eq!(
         app.get(&base, &admin).await.0,
         StatusCode::FORBIDDEN,

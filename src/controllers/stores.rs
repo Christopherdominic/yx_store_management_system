@@ -1,13 +1,9 @@
 use axum::{extract::State, http::StatusCode};
-use uuid::Uuid;
 
 use crate::{
     errors::AppResult,
     middlewares::auth::AuthUser,
-    models::{
-        roles::Permission,
-        store::{Store, StoreSettings, StoreStatus},
-    },
+    models::{BusinessId, Permission, Store, StoreId, StoreSettings, StoreStatus},
     services::{
         access::authorize,
         stores::{self, CreateStore, StoreFilter, UpdateStore, UpdateStoreSettings},
@@ -19,7 +15,7 @@ use crate::{
 pub async fn create(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(business_id): Path<Uuid>,
+    Path(business_id): Path<BusinessId>,
     Json(input): Json<CreateStore>,
 ) -> AppResult<(StatusCode, Json<Store>)> {
     authorize(
@@ -39,7 +35,7 @@ pub async fn create(
 pub async fn list(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(business_id): Path<Uuid>,
+    Path(business_id): Path<BusinessId>,
     Query(filter): Query<StoreFilter>,
 ) -> AppResult<Json<Vec<Store>>> {
     let access = authorize(
@@ -59,7 +55,7 @@ pub async fn list(
 pub async fn get(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, store_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, store_id)): Path<(BusinessId, StoreId)>,
 ) -> AppResult<Json<Store>> {
     authorize(
         &state,
@@ -75,7 +71,7 @@ pub async fn get(
 pub async fn update(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, store_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, store_id)): Path<(BusinessId, StoreId)>,
     Json(input): Json<UpdateStore>,
 ) -> AppResult<Json<Store>> {
     authorize(
@@ -94,7 +90,7 @@ pub async fn update(
 pub async fn activate(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, store_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, store_id)): Path<(BusinessId, StoreId)>,
 ) -> AppResult<Json<Store>> {
     set_status(state, user, business_id, store_id, StoreStatus::Active).await
 }
@@ -102,7 +98,7 @@ pub async fn activate(
 pub async fn deactivate(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, store_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, store_id)): Path<(BusinessId, StoreId)>,
 ) -> AppResult<Json<Store>> {
     set_status(state, user, business_id, store_id, StoreStatus::Inactive).await
 }
@@ -110,8 +106,8 @@ pub async fn deactivate(
 async fn set_status(
     state: AppState,
     user: AuthUser,
-    business_id: Uuid,
-    store_id: Uuid,
+    business_id: BusinessId,
+    store_id: StoreId,
     status: StoreStatus,
 ) -> AppResult<Json<Store>> {
     authorize(
@@ -130,7 +126,7 @@ async fn set_status(
 pub async fn get_settings(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, store_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, store_id)): Path<(BusinessId, StoreId)>,
 ) -> AppResult<Json<StoreSettings>> {
     authorize(
         &state,
@@ -140,14 +136,15 @@ pub async fn get_settings(
         Permission::StoreView,
     )
     .await?;
-    let store = stores::get(&state.pool, business_id, store_id).await?;
-    Ok(Json(StoreSettings::from(&store)))
+    Ok(Json(
+        stores::get_settings(&state.pool, business_id, store_id).await?,
+    ))
 }
 
 pub async fn update_settings(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((business_id, store_id)): Path<(Uuid, Uuid)>,
+    Path((business_id, store_id)): Path<(BusinessId, StoreId)>,
     Json(input): Json<UpdateStoreSettings>,
 ) -> AppResult<Json<StoreSettings>> {
     authorize(

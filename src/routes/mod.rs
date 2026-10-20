@@ -31,10 +31,6 @@ fn api() -> Router<AppState> {
         .route("/roles", get(auth::roles))
         // Businesses and settings (FR-01, FR-03)
         .route(
-            "/businesses",
-            get(businesses::list).post(businesses::create),
-        )
-        .route(
             "/businesses/{business_id}",
             get(businesses::get).patch(businesses::update),
         )

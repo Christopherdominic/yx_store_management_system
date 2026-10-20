@@ -1,74 +1,67 @@
+//! Domain models for the multi-store retail management system.
+//!
+//! Conventions shared by every model:
+//! - Identifiers are strongly typed UUID v7 wrappers (see [`ids`]), so a
+//!   `StoreId` can never be passed where a `ProductId` is expected.
+//! - Money and quantities use exact decimals ([`Money`], [`Quantity`]);
+//!   floating point is never used for financial values (SRS NFR-30).
+//! - Timestamps are stored in UTC. Business-local display uses the
+//!   business timezone.
+//! - Records referenced by history are archived or deactivated, never deleted.
+
+pub mod adjustment;
 pub mod audit;
 pub mod business;
-pub mod roles;
+pub mod common;
+pub mod customer;
+pub mod employee;
+pub mod expense;
+pub mod ids;
+pub mod inventory;
+pub mod notification;
+pub mod permission;
+pub mod product;
+pub mod purchase;
+pub mod sale;
+pub mod sale_return;
+pub mod settings;
 pub mod store;
+pub mod supplier;
+pub mod transfer;
 pub mod user;
 
-// customer, expenses, inventory, product, sales, and stock are drafts for
-// later FR sections and are not compiled yet.
-
-/// Declares an enum stored in Postgres as TEXT and serialized as the same
-/// snake_case string in JSON.
-macro_rules! text_enum {
-    ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-        pub enum $name {
-            $(#[serde(rename = $text)] $variant),+
-        }
-
-        impl $name {
-            pub const ALL: &'static [$name] = &[$($name::$variant),+];
-
-            pub fn as_str(self) -> &'static str {
-                match self {
-                    $($name::$variant => $text),+
-                }
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl std::str::FromStr for $name {
-            type Err = String;
-
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                match s {
-                    $($text => Ok($name::$variant),)+
-                    other => Err(format!("unknown {} value '{}'", stringify!($name), other)),
-                }
-            }
-        }
-
-        impl sqlx::Type<sqlx::Postgres> for $name {
-            fn type_info() -> sqlx::postgres::PgTypeInfo {
-                <String as sqlx::Type<sqlx::Postgres>>::type_info()
-            }
-
-            fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
-                <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
-            }
-        }
-
-        impl<'r> sqlx::Decode<'r, sqlx::Postgres> for $name {
-            fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-                let text = <&str as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
-                Ok(text.parse()?)
-            }
-        }
-
-        impl sqlx::Encode<'_, sqlx::Postgres> for $name {
-            fn encode_by_ref(
-                &self,
-                buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
-            ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-                <&str as sqlx::Encode<sqlx::Postgres>>::encode(self.as_str(), buf)
-            }
-        }
-    };
-}
-
-pub(crate) use text_enum;
+pub use adjustment::{
+    AdjustmentKind, AdjustmentStatus, StockAdjustment, StockAdjustmentItem, StockCount,
+    StockCountItem, StockCountStatus,
+};
+pub use audit::{AuditAction, AuditActor, AuditLog, AuditOutcome};
+pub use business::{Business, BusinessStatus};
+pub use common::{
+    Address, ContactInfo, CurrencyCode, InvalidCurrencyCode, Money, Quantity, RecordRef,
+    RecordStatus, RecordType,
+};
+pub use customer::Customer;
+pub use employee::{Employee, EmployeeStoreRole};
+pub use expense::{Expense, ExpenseCategory, ExpensePaymentStatus, ExpenseStatus};
+pub use ids::*;
+pub use inventory::{InventoryBatch, InventoryItem, StockMovement, StockMovementType};
+pub use notification::{Notification, NotificationChannel, NotificationEvent, NotificationStatus};
+pub use permission::Permission;
+pub use product::{PriceChange, Product, ProductCategory, ProductVariant, UnitOfMeasure};
+pub use purchase::{
+    GoodsReceipt, GoodsReceiptItem, GoodsReceiptStatus, PurchaseOrder, PurchaseOrderItem,
+    PurchaseOrderStatus, PurchaseReturn, PurchaseReturnItem, PurchaseReturnStatus,
+};
+pub use sale::{
+    Payment, PaymentMethod, PaymentStatus, Sale, SaleItem, SalePaymentStatus, SaleStatus,
+};
+pub use sale_return::{
+    ItemCondition, Refund, RefundStatus, SaleReturn, SaleReturnItem, SaleReturnStatus,
+};
+pub use settings::{BusinessSettings, StoreSettings};
+pub use store::{Store, StoreStatus};
+pub use supplier::{
+    Supplier, SupplierLedgerEntry, SupplierLedgerEntryType, SupplierProduct, SupplierStatus,
+};
+pub use transfer::{StockTransfer, StockTransferItem, TransferStatus};
+pub use user::{Role, RoleAssignment, User, UserStatus};

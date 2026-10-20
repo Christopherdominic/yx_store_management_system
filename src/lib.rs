@@ -1,5 +1,8 @@
+//! XY Store: multi-store retail management system.
+
 pub mod config;
 pub mod controllers;
+pub mod db;
 pub mod errors;
 pub mod middlewares;
 pub mod models;

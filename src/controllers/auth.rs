@@ -5,21 +5,24 @@ use serde_json::{Value, json};
 use crate::{
     errors::AppResult,
     middlewares::auth::AuthUser,
-    models::{
-        roles::{BusinessRole, StoreRole},
-        user::User,
+    models::Role,
+    services::{
+        auth::{
+            self, ChangePasswordInput, LoginResult, RegisterInput, Registration, ResetPasswordInput,
+        },
+        businesses, employees,
     },
-    services::auth::{self, ChangePasswordInput, LoginResult, RegisterInput, ResetPasswordInput},
     state::AppState,
     utils::extract::Json,
 };
 
+/// Onboards a new business together with its owner account.
 pub async fn register(
     State(state): State<AppState>,
     Json(input): Json<RegisterInput>,
-) -> AppResult<(StatusCode, Json<User>)> {
-    let user = auth::register_owner(&state, input).await?;
-    Ok((StatusCode::CREATED, Json(user)))
+) -> AppResult<(StatusCode, Json<Registration>)> {
+    let registration = auth::register(&state, input).await?;
+    Ok((StatusCode::CREATED, Json(registration)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,9 +51,10 @@ pub async fn logout_all(State(state): State<AppState>, user: AuthUser) -> AppRes
 }
 
 pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    let profile = auth::get_user(&state.pool, user.user_id).await?;
-    let memberships = auth::memberships(&state.pool, user.user_id).await?;
-    Ok(Json(json!({ "user": profile, "memberships": memberships })))
+    let mut conn = state.pool.acquire().await?;
+    let employee = employees::load(&mut conn, user.business_id, user.user_id).await?;
+    let business = businesses::get(&state.pool, user.business_id).await?;
+    Ok(Json(json!({ "employee": employee, "business": business })))
 }
 
 pub async fn change_password(
@@ -96,13 +100,16 @@ pub async fn reset_password(
 
 /// The supported roles and what each one may do.
 pub async fn roles() -> Json<Value> {
-    let business_roles: Vec<Value> = BusinessRole::ALL
+    let roles: Vec<Value> = Role::ALL
         .iter()
-        .map(|r| json!({ "role": r, "scope": "business", "permissions": r.permissions() }))
+        .map(|role| {
+            let scope = if role.is_business_wide() {
+                "business"
+            } else {
+                "store"
+            };
+            json!({ "role": role, "scope": scope, "permissions": role.permissions() })
+        })
         .collect();
-    let store_roles: Vec<Value> = StoreRole::ALL
-        .iter()
-        .map(|r| json!({ "role": r, "scope": "store", "permissions": r.permissions() }))
-        .collect();
-    Json(json!({ "business_roles": business_roles, "store_roles": store_roles }))
+    Json(json!({ "roles": roles }))
 }

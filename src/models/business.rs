@@ -1,62 +1,44 @@
-use chrono::{DateTime, Utc};
-use serde::Serialize;
-use sqlx::FromRow;
-use uuid::Uuid;
+//! Businesses (tenants). Every other record belongs to exactly one business.
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::common::{Address, ContactInfo, CurrencyCode};
+use super::ids::BusinessId;
+
+/// A business profile (SRS FR-01, FR-03).
+///
+/// Stores are not embedded here; each [`Store`](super::Store) references its
+/// business through `business_id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Business {
-    pub id: Uuid,
+    pub id: BusinessId,
     pub legal_name: String,
-    pub trading_name: String,
+    pub trading_name: Option<String>,
     pub registration_number: Option<String>,
-    pub address: String,
-    pub phone: Option<String>,
-    pub email: Option<String>,
+    pub address: Address,
+    pub contact: ContactInfo,
     pub logo_url: Option<String>,
-    pub base_currency: String,
+    /// Default currency for transactions recorded under this business.
+    pub base_currency: CurrencyCode,
+    /// IANA timezone name, e.g. `Africa/Lagos`.
     pub timezone: String,
-    pub tax_name: String,
-    pub tax_rate_bps: i32,
-    pub prices_include_tax: bool,
-    pub tax_id: Option<String>,
-    pub receipt_header: Option<String>,
-    pub receipt_footer: Option<String>,
-    pub created_by: Uuid,
+    pub status: BusinessStatus,
     pub created_at: DateTime<Utc>,
-    pub updated_by: Uuid,
     pub updated_at: DateTime<Utc>,
 }
 
-/// Business-wide settings (FR-03). Tax rate is in basis points (750 = 7.50%).
-#[derive(Debug, Clone, Serialize)]
-pub struct BusinessSettings {
-    pub business_id: Uuid,
-    pub base_currency: String,
-    pub timezone: String,
-    pub tax_name: String,
-    pub tax_rate_bps: i32,
-    pub prices_include_tax: bool,
-    pub tax_id: Option<String>,
-    pub receipt_header: Option<String>,
-    pub receipt_footer: Option<String>,
-    pub phone: Option<String>,
-    pub email: Option<String>,
+impl Business {
+    /// Name shown on receipts and in the UI.
+    pub fn display_name(&self) -> &str {
+        self.trading_name.as_deref().unwrap_or(&self.legal_name)
+    }
 }
 
-impl From<&Business> for BusinessSettings {
-    fn from(b: &Business) -> Self {
-        Self {
-            business_id: b.id,
-            base_currency: b.base_currency.clone(),
-            timezone: b.timezone.clone(),
-            tax_name: b.tax_name.clone(),
-            tax_rate_bps: b.tax_rate_bps,
-            prices_include_tax: b.prices_include_tax,
-            tax_id: b.tax_id.clone(),
-            receipt_header: b.receipt_header.clone(),
-            receipt_footer: b.receipt_footer.clone(),
-            phone: b.phone.clone(),
-            email: b.email.clone(),
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BusinessStatus {
+    #[default]
+    Active,
+    Suspended,
 }

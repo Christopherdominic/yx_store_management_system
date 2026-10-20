@@ -1,22 +1,10 @@
+//! What each [`Role`] may do (SRS FR-05, FR-06).
+
 use serde::Serialize;
 
-use super::text_enum;
+use super::user::Role;
 
-// Business-wide roles apply to every store in the business.
-text_enum!(BusinessRole {
-    BusinessOwner => "business_owner",
-    Administrator => "administrator",
-});
-
-// Store roles apply only to the store they are assigned to (FR-05).
-text_enum!(StoreRole {
-    StoreManager => "store_manager",
-    Cashier => "cashier",
-    InventoryOfficer => "inventory_officer",
-    FinanceOfficer => "finance_officer",
-});
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
     BusinessView,
@@ -29,7 +17,7 @@ pub enum Permission {
     StoreSettingsUpdate,
     EmployeeView,
     EmployeeManage,
-    /// Grant or revoke the business_owner / administrator roles.
+    /// Grant or revoke the business owner / administrator roles.
     BusinessRoleManage,
     AuditLogView,
 }
@@ -47,10 +35,19 @@ impl Permission {
 
 use Permission::*;
 
-impl BusinessRole {
+impl Role {
+    pub const ALL: &'static [Role] = &[
+        Role::BusinessOwner,
+        Role::Administrator,
+        Role::StoreManager,
+        Role::Cashier,
+        Role::InventoryOfficer,
+        Role::FinanceOfficer,
+    ];
+
     pub fn permissions(self) -> &'static [Permission] {
         match self {
-            Self::BusinessOwner => &[
+            Role::BusinessOwner => &[
                 BusinessView,
                 BusinessUpdate,
                 BusinessSettingsUpdate,
@@ -64,7 +61,7 @@ impl BusinessRole {
                 BusinessRoleManage,
                 AuditLogView,
             ],
-            Self::Administrator => &[
+            Role::Administrator => &[
                 BusinessView,
                 BusinessUpdate,
                 BusinessSettingsUpdate,
@@ -77,23 +74,20 @@ impl BusinessRole {
                 EmployeeManage,
                 AuditLogView,
             ],
-        }
-    }
-}
-
-impl StoreRole {
-    pub fn permissions(self) -> &'static [Permission] {
-        match self {
-            Self::StoreManager => &[
+            Role::StoreManager => &[
                 BusinessView,
                 StoreView,
                 StoreUpdate,
                 StoreSettingsUpdate,
                 EmployeeView,
             ],
-            Self::Cashier | Self::InventoryOfficer | Self::FinanceOfficer => {
+            Role::Cashier | Role::InventoryOfficer | Role::FinanceOfficer => {
                 &[BusinessView, StoreView]
             }
         }
+    }
+
+    pub fn has(self, permission: Permission) -> bool {
+        self.permissions().contains(&permission)
     }
 }
