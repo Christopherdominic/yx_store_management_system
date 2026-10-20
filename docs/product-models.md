@@ -1,13 +1,14 @@
 # Product management models
 
 The models cover FR-07, FR-08, and FR-09 in the SRS. They live in
-`src/models/` and are exported from `xy_store::models`. IDs remain `u64`, consistent with existing domain records.
+`src/models/` and are exported from `xy_store::models`. IDs are typed UUIDs (`ProductId`, `ProductCategoryId`, ...) and prices use
+the shared `Money` type, consistent with the other domain models.
 Relationships use IDs rather than nested copies of entities.
 
 - `Product`: business-owned catalogue entry, category, identifiers (SKU,
   barcode), descriptive fields (brand, image, extra attributes), unit of
   measurement, cost/selling prices, lifecycle, and timestamps.
-- `Category`: business-owned category with an active/archived lifecycle.
+- `ProductCategory`: business-owned category with an active/archived lifecycle.
   Categories can be nested through an optional parent.
 - `ProductVariant`: independently identified, priced, and stocked variation of a
   parent product. Attributes hold values such as size and colour; variants use
@@ -38,18 +39,15 @@ price history and current prices atomically; a change to both cost and selling
 price produces two history entries. Future-effective changes require scheduling
 in the service layer so they do not replace current prices prematurely.
 
-Inventory, sale items, and stock movements will need an optional variant ID to
-support independently stocked variants. Completed sale items must retain decimal
-unit-price and discount snapshots. These integrations and the existing unrelated
-model scaffolds are outside this product-model change; their existing `f64`
-monetary fields still need migration before financial processing is implemented.
+Inventory, sale items, and stock movements already carry an optional variant
+ID, and completed sale items keep their own unit-price and discount snapshots.
 
 ## Files
 
 | File | Models |
 | --- | --- |
-| `src/models/product.rs` | `Product`, `ProductStatus`, `UnitOfMeasure` |
-| `src/models/category.rs` | `Category` |
+| `src/models/product.rs` | `Product`, `UnitOfMeasure` |
+| `src/models/category.rs` | `ProductCategory` |
 | `src/models/product_variant.rs` | `ProductVariant` |
 | `src/models/price_history.rs` | `PriceHistory`, `PriceType` |
 

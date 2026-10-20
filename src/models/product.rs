@@ -1,25 +1,27 @@
+//! Product catalogue entries (SRS FR-07).
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-/// Business-owned catalogue entry (SRS FR-07).
+use super::common::{Money, RecordStatus};
+use super::ids::{BusinessId, ProductCategoryId, ProductId};
+
+/// Business-owned catalogue entry, shared by every store in the business.
 ///
 /// A product without variants is stocked and sold directly. A product with
-/// variants is stocked and sold through each [`ProductVariant`], and its own
-/// SKU and prices act as catalogue defaults.
+/// variants is stocked and sold through each
+/// [`ProductVariant`](super::ProductVariant), and its own SKU and prices act
+/// as catalogue defaults.
 ///
-/// Prices are in the business currency and serialize as strings so no
-/// precision is lost. Products referenced by history are archived, never
-/// deleted.
-///
-/// [`ProductVariant`]: super::product_variant::ProductVariant
+/// Prices are in the business currency. Products referenced by history are
+/// archived, never deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Product {
-    pub id: u64,
-    pub business_id: u64,
-    pub category_id: Option<u64>,
+    pub id: ProductId,
+    pub business_id: BusinessId,
+    pub category_id: Option<ProductCategoryId>,
     pub name: String,
     pub description: Option<String>,
     /// Unique across products and variants within the business.
@@ -28,14 +30,14 @@ pub struct Product {
     pub brand: Option<String>,
     pub image_url: Option<String>,
     pub unit_of_measure: UnitOfMeasure,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub cost_price: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub selling_price: Decimal,
+    pub cost_price: Money,
+    pub selling_price: Money,
     /// Extra descriptive attributes, e.g. `{"origin": "Nigeria"}`.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
-    pub status: ProductStatus,
+    /// Whether stock is tracked per batch with expiry dates (SRS FR-14).
+    pub tracks_batches: bool,
+    pub status: RecordStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -43,22 +45,13 @@ pub struct Product {
 impl Product {
     /// Archived products stay readable but cannot be sold or restocked.
     pub fn is_active(&self) -> bool {
-        self.status == ProductStatus::Active
+        self.status == RecordStatus::Active
     }
 
     /// Selling price minus cost price per unit.
-    pub fn unit_margin(&self) -> Decimal {
+    pub fn unit_margin(&self) -> Money {
         self.selling_price - self.cost_price
     }
-}
-
-/// Lifecycle shared by products, variants and categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductStatus {
-    #[default]
-    Active,
-    Archived,
 }
 
 /// Unit that stock and sale quantities are measured in (SRS FR-10).
@@ -95,9 +88,9 @@ mod tests {
 
     fn product() -> Product {
         Product {
-            id: 1,
-            business_id: 1,
-            category_id: Some(10),
+            id: ProductId::generate(),
+            business_id: BusinessId::generate(),
+            category_id: Some(ProductCategoryId::generate()),
             name: "Rice 50kg".into(),
             description: None,
             sku: "RICE-50".into(),
@@ -108,7 +101,8 @@ mod tests {
             cost_price: dec!(65000.00),
             selling_price: dec!(72500.50),
             attributes: BTreeMap::new(),
-            status: ProductStatus::Active,
+            tracks_batches: false,
+            status: RecordStatus::Active,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -134,7 +128,7 @@ mod tests {
     fn archived_products_are_inactive() {
         let mut p = product();
         assert!(p.is_active());
-        p.status = ProductStatus::Archived;
+        p.status = RecordStatus::Archived;
         assert!(!p.is_active());
     }
 

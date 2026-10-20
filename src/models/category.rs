@@ -1,28 +1,31 @@
+//! Product categories (SRS FR-08).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::product::ProductStatus;
+use super::common::RecordStatus;
+use super::ids::{BusinessId, ProductCategoryId};
 
-/// Business-owned product category (SRS FR-08). Products reference it by ID.
+/// Business-owned product category. Products reference it by ID.
 ///
-/// Categories can be nested one under another through `parent_id`, e.g.
-/// "Groceries" > "Grains". Archived categories keep their products readable.
+/// Categories can be nested through `parent_id`, e.g. "Groceries" >
+/// "Grains". Archived categories keep their products readable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Category {
-    pub id: u64,
-    pub business_id: u64,
-    pub parent_id: Option<u64>,
+pub struct ProductCategory {
+    pub id: ProductCategoryId,
+    pub business_id: BusinessId,
+    pub parent_id: Option<ProductCategoryId>,
     /// Unique among sibling categories within the business.
     pub name: String,
     pub description: Option<String>,
-    pub status: ProductStatus,
+    pub status: RecordStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-impl Category {
+impl ProductCategory {
     pub fn is_active(&self) -> bool {
-        self.status == ProductStatus::Active
+        self.status == RecordStatus::Active
     }
 
     pub fn is_top_level(&self) -> bool {

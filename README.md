@@ -12,6 +12,7 @@ single business: inventory, sales, stock transfers, customers, and expenses.
 .
 ├── src/
 │   ├── main.rs          # entry point
+│   ├── lib.rs           # library root
 │   ├── models/          # domain data structures
 │   ├── controllers/     # request handlers (planned)
 │   ├── routes/          # route definitions (planned)
@@ -26,22 +27,38 @@ single business: inventory, sales, stock transfers, customers, and expenses.
 
 ## Domain models
 
-Defined under `src/models/`:
+Defined under `src/models/`, one module per area:
 
-- **Business / Store** — a business with one or more stores, each with a
-  status (`Active` / `Inactive`).
-- **User / StoreEmployee** — users assigned to a store with a role
-  (`Manager`, `Cashier`, `InventoryOfficer`).
-- **Product / Category / ProductVariant / PriceHistory** — catalogue items,
-  categories, independently stocked variants, and an audit trail of price
-  changes. See [`docs/product-models.md`](docs/product-models.md).
-- **Inventory** — per-store stock levels and reorder thresholds for a product.
-- **StockTransfer** — movement of stock between stores, with a status
-  (`Pending`, `Approved`, `Rejected`, `Completed`, `Cancelled`).
-- **Customer** — customers attached to a business.
-- **Sale / SaleItem** — point-of-sale transactions and their line items.
-- **Expense** — store expenses categorized (`Rent`, `Salary`,
-  `Electricity`, etc.).
+| Module | Models | SRS |
+| --- | --- | --- |
+| `business` | `Business` | FR-01, FR-03 |
+| `store` | `Store` (`Active` / `Inactive`) | FR-02 |
+| `user` | `User`, `RoleAssignment`, `Role` | FR-04, FR-05 |
+| `product`, `category`, `product_variant`, `price_history` | `Product`, `ProductCategory`, `ProductVariant`, `PriceHistory` ([details](docs/product-models.md)) | FR-07 – FR-09 |
+| `inventory` | `InventoryItem`, `InventoryBatch`, `StockMovement` | FR-10 – FR-14 |
+| `adjustment` | `StockCount`, `StockAdjustment` | FR-12 |
+| `transfer` | `StockTransfer`, `StockTransferItem` | FR-22 |
+| `sale` | `Sale`, `SaleItem`, `Payment` | FR-15 – FR-17 |
+| `sale_return` | `SaleReturn`, `SaleReturnItem`, `Refund` | FR-18 |
+| `customer` | `Customer` | FR-19 |
+| `supplier` | `Supplier`, `SupplierProduct`, `SupplierLedgerEntry` | FR-20, FR-23 |
+| `purchase` | `PurchaseOrder`, `GoodsReceipt`, `PurchaseReturn` (+ items) | FR-21, FR-23 |
+| `expense` | `ExpenseCategory`, `Expense` | FR-24 |
+| `notification` | `Notification` | FR-13, FR-26 |
+| `audit` | `AuditLog` | FR-27 |
+| `ids`, `common` | Typed IDs, `Money`, `Quantity`, `CurrencyCode`, `RecordRef`, `Address` | — |
+
+Conventions:
+
+- **Typed IDs** — every entity has its own UUID v7 ID type (`StoreId`,
+  `ProductId`, ...), so IDs can't be mixed up.
+- **Exact money** — amounts use `rust_decimal::Decimal`, never `f64`
+  (NFR-30), and serialize to JSON as strings (`"1999.99"`).
+- **UTC timestamps** — `created_at` / `updated_at` on every record.
+- **No hard deletes** — records referenced by history are archived or
+  deactivated instead.
+- **Snapshots** — sales copy product name, SKU and unit price so receipts
+  never change after a price update.
 
 ## Getting started
 
