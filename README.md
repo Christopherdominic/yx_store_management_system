@@ -43,9 +43,7 @@ Defined under `src/models/`, one module per area:
 | `store` | `Store` (`Active` / `Inactive`) | FR-02 |
 | `settings` | `BusinessSettings`, `StoreSettings` | FR-03 |
 | `user` | `User`, `RoleAssignment`, `Role` | FR-04, FR-05 |
-| `employee` | `Employee` (API view of a user and their roles) | FR-05 |
-| `permission` | `Permission`, role → permission table | FR-05, FR-06 |
-| `product` | `ProductCategory`, `Product`, `ProductVariant`, `PriceChange` | FR-07 – FR-09 |
+| `product`, `category`, `product_variant`, `price_history` | `Product`, `ProductCategory`, `ProductVariant`, `PriceHistory` ([details](docs/product-models.md)) | FR-07 – FR-09 |
 | `inventory` | `InventoryItem`, `InventoryBatch`, `StockMovement` | FR-10 – FR-14 |
 | `adjustment` | `StockCount`, `StockAdjustment` | FR-12 |
 | `transfer` | `StockTransfer`, `StockTransferItem` | FR-22 |

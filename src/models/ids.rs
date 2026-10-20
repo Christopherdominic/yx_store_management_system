@@ -60,7 +60,7 @@ define_ids!(
     ProductCategoryId,
     ProductId,
     ProductVariantId,
-    PriceChangeId,
+    PriceHistoryId,
     InventoryItemId,
     StockMovementId,
     StockTransferId,
