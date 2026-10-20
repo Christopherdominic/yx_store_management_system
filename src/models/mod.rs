@@ -12,13 +12,16 @@
 pub mod adjustment;
 pub mod audit;
 pub mod business;
+pub mod category;
 pub mod common;
 pub mod customer;
 pub mod expense;
 pub mod ids;
 pub mod inventory;
 pub mod notification;
+pub mod price_history;
 pub mod product;
+pub mod product_variant;
 pub mod purchase;
 pub mod sale;
 pub mod sale_return;
@@ -33,6 +36,7 @@ pub use adjustment::{
 };
 pub use audit::{AuditAction, AuditActor, AuditLog, AuditOutcome};
 pub use business::{Business, BusinessStatus};
+pub use category::ProductCategory;
 pub use common::{
     Address, ContactInfo, CurrencyCode, InvalidCurrencyCode, Money, Quantity, RecordRef,
     RecordStatus, RecordType,
@@ -42,7 +46,9 @@ pub use expense::{Expense, ExpenseCategory, ExpensePaymentStatus, ExpenseStatus}
 pub use ids::*;
 pub use inventory::{InventoryBatch, InventoryItem, StockMovement, StockMovementType};
 pub use notification::{Notification, NotificationChannel, NotificationEvent, NotificationStatus};
-pub use product::{PriceChange, Product, ProductCategory, ProductVariant, UnitOfMeasure};
+pub use price_history::{PriceHistory, PriceType};
+pub use product::{Product, UnitOfMeasure};
+pub use product_variant::ProductVariant;
 pub use purchase::{
     GoodsReceipt, GoodsReceiptItem, GoodsReceiptStatus, PurchaseOrder, PurchaseOrderItem,
     PurchaseOrderStatus, PurchaseReturn, PurchaseReturnItem, PurchaseReturnStatus,

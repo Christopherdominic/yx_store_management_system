@@ -34,7 +34,7 @@ Defined under `src/models/`, one module per area:
 | `business` | `Business` | FR-01, FR-03 |
 | `store` | `Store` (`Active` / `Inactive`) | FR-02 |
 | `user` | `User`, `RoleAssignment`, `Role` | FR-04, FR-05 |
-| `product` | `ProductCategory`, `Product`, `ProductVariant`, `PriceChange` | FR-07 – FR-09 |
+| `product`, `category`, `product_variant`, `price_history` | `Product`, `ProductCategory`, `ProductVariant`, `PriceHistory` ([details](docs/product-models.md)) | FR-07 – FR-09 |
 | `inventory` | `InventoryItem`, `InventoryBatch`, `StockMovement` | FR-10 – FR-14 |
 | `adjustment` | `StockCount`, `StockAdjustment` | FR-12 |
 | `transfer` | `StockTransfer`, `StockTransferItem` | FR-22 |

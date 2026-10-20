@@ -88,7 +88,7 @@ pub enum RecordType {
     ProductCategory,
     Product,
     ProductVariant,
-    PriceChange,
+    PriceHistory,
     InventoryItem,
     InventoryBatch,
     StockMovement,
