@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+rust_decimal = { version = "1.43.0", features = ["serde-with-str"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+uuid = { version = "1.28.0", features = ["v7", "serde"] }
+
+[dev-dependencies]
+rust_decimal_macros = "1.40.0"
