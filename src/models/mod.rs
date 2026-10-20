@@ -15,6 +15,7 @@ pub mod business;
 pub mod category;
 pub mod common;
 pub mod customer;
+pub mod employee;
 pub mod expense;
 pub mod ids;
 pub mod inventory;
@@ -25,6 +26,7 @@ pub mod product_variant;
 pub mod purchase;
 pub mod sale;
 pub mod sale_return;
+pub mod settings;
 pub mod store;
 pub mod supplier;
 pub mod transfer;
@@ -42,6 +44,7 @@ pub use common::{
     RecordStatus, RecordType,
 };
 pub use customer::Customer;
+pub use employee::{Employee, EmployeeStoreRole};
 pub use expense::{Expense, ExpenseCategory, ExpensePaymentStatus, ExpenseStatus};
 pub use ids::*;
 pub use inventory::{InventoryBatch, InventoryItem, StockMovement, StockMovementType};
@@ -59,6 +62,7 @@ pub use sale::{
 pub use sale_return::{
     ItemCondition, Refund, RefundStatus, SaleReturn, SaleReturnItem, SaleReturnStatus,
 };
+pub use settings::{BusinessSettings, StoreSettings};
 pub use store::{Store, StoreStatus};
 pub use supplier::{
     Supplier, SupplierLedgerEntry, SupplierLedgerEntryType, SupplierProduct, SupplierStatus,
