@@ -277,7 +277,7 @@ returns `403` and is recorded in the audit log as `access_denied`.
    DATABASE_URL=postgres://xy_store:xy_store@localhost:5432/xy_store cargo test
 
    # frontend
-   cd frontend && pnpm lint && pnpm exec tsc --noEmit && pnpm build
+   cd frontend && pnpm lint && pnpm typecheck && pnpm build
    ```
 
 3. Open a pull request. The template asks which SRS requirement IDs it covers

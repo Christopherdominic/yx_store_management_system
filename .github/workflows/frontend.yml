@@ -44,8 +44,9 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # next typegen generates the route types (LayoutProps etc.) that tsc needs
       - name: Typecheck
-        run: pnpm exec tsc --noEmit
+        run: pnpm typecheck
 
       - name: Build
         run: pnpm build
