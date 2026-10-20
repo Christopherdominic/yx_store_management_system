@@ -32,7 +32,9 @@ Defined under `src/models/`:
   status (`Active` / `Inactive`).
 - **User / StoreEmployee** — users assigned to a store with a role
   (`Manager`, `Cashier`, `InventoryOfficer`).
-- **Product** — catalog items belonging to a business (SKU, price).
+- **Product / Category / ProductVariant / PriceHistory** — catalogue items,
+  categories, independently stocked variants, and an audit trail of price
+  changes. See [`docs/product-models.md`](docs/product-models.md).
 - **Inventory** — per-store stock levels and reorder thresholds for a product.
 - **StockTransfer** — movement of stock between stores, with a status
   (`Pending`, `Approved`, `Rejected`, `Completed`, `Cancelled`).
