@@ -1,99 +1,163 @@
-# XY Store — Multi-Store Retail Management System
+# XY Store
 
-A Rust backend for managing retail operations across multiple stores under a
-single business: inventory, sales, stock transfers, customers, and expenses.
+A backend for retail businesses that run several stores. One business, such
+as Amiable Retail Ltd with stores in Lagos, Abuja and Kaduna, manages its
+stores, staff, products, stock, sales, purchasing and expenses from one
+system, with each employee seeing only the stores they work in.
 
-> **Status:** domain models cover the whole SRS. The HTTP API implements SRS
-> Part A sections 1–2 — business and store management (FR-01 – FR-03) and
-> accounts and access control (FR-04 – FR-06).
+Built in Rust with [Axum](https://github.com/tokio-rs/axum),
+[SQLx](https://github.com/launchbadge/sqlx) and PostgreSQL. Requirements are
+defined in the [SRS](docs/Store-Management-System-SRS-v1.0.pdf); requirement
+IDs such as FR-07 below refer to it.
 
-Built with [Axum](https://github.com/tokio-rs/axum), PostgreSQL, and
-[SQLx](https://github.com/launchbadge/sqlx).
+## Status
 
-## Project structure
+| Area | SRS | Domain models | API |
+| --- | --- | :---: | :---: |
+| Business and store management | FR-01 – FR-03 | ✅ | ✅ |
+| Accounts and access control | FR-04 – FR-06 | ✅ | ✅ |
+| Product management | FR-07 – FR-09 | ✅ | — |
+| Inventory and stock control | FR-10 – FR-14 | ✅ | — |
+| Sales, returns and customers | FR-15 – FR-19 | ✅ | — |
+| Purchasing, suppliers and transfers | FR-20 – FR-23 | ✅ | — |
+| Expenses, notifications and audit | FR-24 – FR-27 | ✅ | Audit log only |
+| Reporting, import/export, approval rules, admin | FR-25, FR-28 – FR-30 | — | — |
 
-```
-.
-├── src/
-│   ├── main.rs          # entry point: config, DB pool, migrations, server
-│   ├── lib.rs           # library root; exposes `app()` for tests
-│   ├── config.rs        # environment configuration
-│   ├── state.rs         # shared application state
-│   ├── models/          # domain data structures
-│   ├── db/              # SQLx mappings for the models (IDs, enums, rows)
-│   ├── routes/          # route table
-│   ├── controllers/     # HTTP handlers: extract, authorize, respond
-│   ├── services/        # business logic, SQL, access control, audit
-│   ├── middlewares/     # bearer-token authentication extractor
-│   ├── errors/          # AppError -> JSON error responses
-│   └── utils/           # hashing, validation, extractors
-├── migrations/          # SQL migrations (run automatically on start)
-├── tests/               # end-to-end API tests
-├── docs/                # requirements and design documents
-└── docker-compose.yml   # local PostgreSQL
-```
+## Quick start
 
-## Domain models
-
-Defined under `src/models/`, one module per area:
-
-| Module | Models | SRS |
-| --- | --- | --- |
-| `business` | `Business` | FR-01, FR-03 |
-| `store` | `Store` (`Active` / `Inactive`) | FR-02 |
-| `settings` | `BusinessSettings`, `StoreSettings` | FR-03 |
-| `user` | `User`, `RoleAssignment`, `Role` | FR-04, FR-05 |
-| `product`, `category`, `product_variant`, `price_history` | `Product`, `ProductCategory`, `ProductVariant`, `PriceHistory` ([details](docs/product-models.md)) | FR-07 – FR-09 |
-| `inventory` | `InventoryItem`, `InventoryBatch`, `StockMovement` | FR-10 – FR-14 |
-| `adjustment` | `StockCount`, `StockAdjustment` | FR-12 |
-| `transfer` | `StockTransfer`, `StockTransferItem` | FR-22 |
-| `sale` | `Sale`, `SaleItem`, `Payment` | FR-15 – FR-17 |
-| `sale_return` | `SaleReturn`, `SaleReturnItem`, `Refund` | FR-18 |
-| `customer` | `Customer` | FR-19 |
-| `supplier` | `Supplier`, `SupplierProduct`, `SupplierLedgerEntry` | FR-20, FR-23 |
-| `purchase` | `PurchaseOrder`, `GoodsReceipt`, `PurchaseReturn` (+ items) | FR-21, FR-23 |
-| `expense` | `ExpenseCategory`, `Expense` | FR-24 |
-| `notification` | `Notification` | FR-13, FR-26 |
-| `audit` | `AuditLog` | FR-27 |
-| `ids`, `common` | Typed IDs, `Money`, `Quantity`, `CurrencyCode`, `RecordRef`, `Address` | — |
-
-Conventions:
-
-- **Typed IDs** — every entity has its own UUID v7 ID type (`StoreId`,
-  `ProductId`, ...), so IDs can't be mixed up.
-- **Exact money** — amounts use `rust_decimal::Decimal`, never `f64`
-  (NFR-30), and serialize to JSON as strings (`"1999.99"`).
-- **UTC timestamps** — `created_at` / `updated_at` on every record.
-- **No hard deletes** — records referenced by history are archived or
-  deactivated instead.
-- **Snapshots** — sales copy product name, SKU and unit price so receipts
-  never change after a price update.
-
-Models stay free of database code; `src/db` maps them to PostgreSQL (typed
-IDs as `UUID`, enums as their snake_case name in `TEXT`, addresses as
-`JSONB`).
-
-## Getting started
-
-Requires a recent [Rust toolchain](https://www.rust-lang.org/tools/install)
-and Docker (for PostgreSQL).
+You need a recent [Rust toolchain](https://www.rust-lang.org/tools/install)
+and Docker.
 
 ```bash
-docker compose up -d          # PostgreSQL on localhost:5432
-cp .env.example .env          # adjust as needed
-cargo run                     # applies migrations, listens on :8080
+docker compose up -d     # PostgreSQL on localhost:5432
+cp .env.example .env     # defaults work for local development
+cargo run                # applies migrations, serves on http://localhost:8080
 ```
 
-Run the tests (API tests each get their own temporary database):
+Check it is running with `curl localhost:8080/health`.
+
+### Running the tests
 
 ```bash
 DATABASE_URL=postgres://xy_store:xy_store@localhost:5432/xy_store cargo test
 ```
 
+Unit tests need no database. The API tests in `tests/api.rs` need
+`DATABASE_URL`; each one runs against its own temporary database, so they
+never touch your development data.
+
+Before opening a pull request, also run `cargo fmt` and
+`cargo clippy --all-targets`.
+
+### Configuration
+
+Settings are read from environment variables (or `.env`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | — (required) | PostgreSQL connection string |
+| `BIND_ADDR` | `0.0.0.0:8080` | Address the server listens on |
+| `DB_MAX_CONNECTIONS` | `10` | Size of the database connection pool |
+| `RUST_LOG` | `xy_store=info,tower_http=info` | Log filter |
+| `SESSION_TTL_MINUTES` | `720` | Maximum session lifetime |
+| `SESSION_IDLE_MINUTES` | `15` | Session expires after this long unused |
+| `MAX_FAILED_LOGINS` | `5` | Failed logins before the account locks |
+| `LOCKOUT_MINUTES` | `15` | How long a locked account stays locked |
+| `PASSWORD_RESET_TTL_MINUTES` | `30` | Lifetime of a password reset token |
+| `ALLOW_OWNER_SIGNUP` | `true` | Allow public registration of new businesses |
+| `EXPOSE_RESET_TOKENS` | `false` | **Development only.** Return reset tokens in the API response, since no email provider is set up yet |
+
+## How the code is organised
+
+```
+src/
+├── main.rs          # starts the server: config, database pool, migrations
+├── lib.rs           # crate root; exposes app() so tests can build the router
+├── config.rs        # environment configuration
+├── state.rs         # shared state passed to every handler
+├── routes/          # the route table
+├── middlewares/     # bearer-token authentication
+├── controllers/     # HTTP handlers: parse the request, check permission, respond
+├── services/        # business rules, SQL, access control, audit logging
+├── db/              # how models are stored in PostgreSQL
+├── models/          # domain types, free of HTTP and database code
+├── errors/          # AppError and its JSON error responses
+└── utils/           # password hashing, validation, extractors
+migrations/          # SQL migrations, applied automatically on start
+tests/               # end-to-end API tests
+docs/                # requirements and design notes
+```
+
+A request flows through these layers in order:
+
+```
+route → middleware (who is calling?) → controller (may they do this?)
+      → service (do it, write the audit log) → database
+```
+
+Keep each layer to its job: controllers don't run SQL, services don't know
+about HTTP, and models don't depend on either.
+
+### Adding a feature
+
+To build the API for a new area, for example products (FR-07 – FR-09):
+
+1. **Migration.** Add `migrations/000N_<name>.sql` with the tables.
+2. **Models.** The domain types already exist in `src/models/`. Adjust them
+   if needed.
+3. **Database mapping.** Teach SQLx to read and write the models in `src/db/`.
+4. **Service.** Add `src/services/<name>.rs` with the business rules. Check
+   permissions there, call `services::stores::ensure_operational` before
+   changing anything in a store, and write audit entries for every change.
+5. **Controller and routes.** Add handlers in `src/controllers/<name>.rs` and
+   register them in `src/routes/mod.rs`.
+6. **Tests.** Add API tests with `#[sqlx::test]` in `tests/`.
+
+Work on a branch, open a pull request against `main`, and merge `main` into
+your branch if it falls behind.
+
+## Domain models
+
+Every area of the SRS has models in `src/models/`, one module per area:
+
+| Module | Models | SRS |
+| --- | --- | --- |
+| `business`, `store`, `settings` | `Business`, `Store`, `BusinessSettings`, `StoreSettings` | FR-01 – FR-03 |
+| `user`, `employee`, `permission` | `User`, `RoleAssignment`, `Role`, `Employee`, `Permission` | FR-04 – FR-06 |
+| `product`, `category`, `product_variant`, `price_history` | `Product`, `ProductCategory`, `ProductVariant`, `PriceHistory` ([details](docs/product-models.md)) | FR-07 – FR-09 |
+| `inventory` | `InventoryItem`, `InventoryBatch`, `StockMovement` | FR-10 – FR-14 |
+| `adjustment` | `StockCount`, `StockAdjustment` | FR-12 |
+| `sale` | `Sale`, `SaleItem`, `Payment` | FR-15 – FR-17 |
+| `sale_return` | `SaleReturn`, `SaleReturnItem`, `Refund` | FR-18 |
+| `customer` | `Customer` | FR-19 |
+| `supplier` | `Supplier`, `SupplierProduct`, `SupplierLedgerEntry` | FR-20, FR-23 |
+| `purchase` | `PurchaseOrder`, `GoodsReceipt`, `PurchaseReturn` and their items | FR-21, FR-23 |
+| `transfer` | `StockTransfer`, `StockTransferItem` | FR-22 |
+| `expense` | `ExpenseCategory`, `Expense` | FR-24 |
+| `notification` | `Notification` | FR-13, FR-26 |
+| `audit` | `AuditLog` | FR-27 |
+| `ids`, `common` | Typed IDs, `Money`, `Quantity`, `CurrencyCode`, `RecordRef`, `Address` | — |
+
+They follow the same conventions:
+
+- **Typed IDs.** Each entity has its own ID type (`StoreId`, `ProductId`, …)
+  wrapping a UUID v7, so one kind of ID can't be passed where another is
+  expected.
+- **Exact money.** Amounts use `Decimal`, never floating point (NFR-30), and
+  appear in JSON as strings such as `"1999.99"`.
+- **UTC timestamps.** Records carry `created_at` and `updated_at`.
+- **No hard deletes.** Records that history depends on are archived or
+  deactivated instead.
+- **Snapshots.** Sales keep the product name, SKU and price they were made
+  with, so receipts never change when a price does.
+
+In PostgreSQL, typed IDs are stored as `UUID`, enums as their snake_case name
+in `TEXT`, and addresses as `JSONB`.
+
 ## Using the API
 
-All endpoints are under `/api/v1`. Protected endpoints take
-`Authorization: Bearer <token>` from `POST /auth/login`. Errors are JSON:
+All endpoints are under `/api/v1`. Log in with `POST /auth/login` and send the
+returned token as `Authorization: Bearer <token>`. Errors are JSON:
 `{"error": {"code": "...", "message": "...", "details": [...]}}`.
 
 ```bash
@@ -150,57 +214,60 @@ curl -X POST localhost:8080/api/v1/businesses/$BUSINESS_ID/stores -H "authorizat
 | PUT, DELETE | `/businesses/{business_id}/employees/{user_id}/stores/{store_id}` | `employee_manage` | FR-05 |
 | GET | `/businesses/{business_id}/audit-logs` | `audit_log_view` | FR-01, FR-06 |
 
-PATCH bodies are partial: omitted fields are unchanged and `""` clears an
-optional field. Audit logs filter by `actor_user_id`, `action`, `store_id`,
-`record_id`, `outcome`, `from`, `to`, `limit`, and `offset`.
+PATCH requests are partial: omitted fields stay unchanged and `""` clears an
+optional field. Audit logs can be filtered by `actor_user_id`, `action`,
+`store_id`, `record_id`, `outcome`, `from`, `to`, `limit` and `offset`.
 
-### Roles
+### Roles and permissions
 
 | Role | Scope | Can |
 | --- | --- | --- |
-| `business_owner` | all stores | everything, including granting owner/administrator |
-| `administrator` | all stores | everything except granting business roles or modifying owners/administrators |
-| `store_manager` | assigned store | view and edit the store and its settings, view its staff |
-| `cashier`, `inventory_officer`, `finance_officer` | assigned store | view the store |
+| `business_owner` | All stores | Everything, including granting owner and administrator roles |
+| `administrator` | All stores | Everything except granting business roles or changing owners and administrators |
+| `store_manager` | Assigned store | View and edit the store and its settings, view its staff |
+| `cashier`, `inventory_officer`, `finance_officer` | Assigned store | View the store |
 
 Each user belongs to one business. They hold at most one business-wide role
-and one role per store, so they can be a manager in Lagos and a cashier in
-Abuja. Changing a role revokes the old `RoleAssignment` and adds a new one,
-keeping the history. Permissions are computed per request from the database
-for the business/store in the URL; a store the user is not assigned to
-returns `403` and is written to the audit log as `access_denied`.
+and one role per store, so someone can be a manager in Lagos and a cashier in
+Abuja. Changing a role revokes the old assignment and adds a new one, so the
+history is kept.
 
-### Rules worth knowing
+Permissions are checked on every request against the database, for the
+business and store in the URL. Asking for a store you aren't assigned to
+returns `403` and is recorded in the audit log as `access_denied`.
 
-- **Sessions** are opaque random tokens; only their SHA-256 is stored. They
-  expire after `SESSION_TTL_MINUTES`, or after `SESSION_IDLE_MINUTES` without
-  use, and are revoked on logout, password change (other sessions), password
-  reset, and employee deactivation.
-- **Passwords** are hashed with Argon2id and kept in `user_credentials`,
-  apart from `users`. They need 8–128 characters with a letter and a digit;
-  five consecutive failures lock the account for `LOCKOUT_MINUTES`.
-- **Password reset** tokens are single-use and expire after
-  `PASSWORD_RESET_TTL_MINUTES`. No email provider is wired up yet: set
-  `EXPOSE_RESET_TOKENS=true` in development to receive the token in the
-  response.
-- **Settings effective-date policy (FR-03):** settings changes take effect
-  immediately for transactions created afterwards. Transactions store the
-  currency, tax, and price values they were created with, so changing
-  settings never rewrites history. Every change is audited with before/after
-  values.
-- **Stores** are never deleted. A deactivated store keeps its history; later
-  modules must call `services::stores::ensure_operational` before recording
-  sales, stock movements, purchases, or transfers.
-- **Audit logs** are append-only; a database trigger rejects updates and
-  deletes.
+### Security and data rules
+
+- **Sessions** are random tokens; only their SHA-256 hash is stored. They end
+  after `SESSION_TTL_MINUTES`, after `SESSION_IDLE_MINUTES` without use, or on
+  logout. Changing a password signs out your other sessions; a password reset
+  or deactivating an employee signs out all of theirs.
+- **Passwords** are hashed with Argon2id and stored apart from user records.
+  They need 8–128 characters including a letter and a digit. After
+  `MAX_FAILED_LOGINS` failures in a row the account locks for
+  `LOCKOUT_MINUTES`.
+- **Password reset tokens** work once and expire after
+  `PASSWORD_RESET_TTL_MINUTES`.
+- **Settings changes** (FR-03) apply to transactions created afterwards.
+  Transactions keep the currency, tax and prices they were made with, so a
+  settings change never rewrites history. Every change is audited with its
+  before and after values.
+- **Stores** are never deleted. A deactivated store keeps its history but
+  accepts no new activity.
+- **Audit logs** can't be edited or deleted; a database trigger blocks it.
 
 ## Not yet covered
 
-- MFA for administrative functions (NFR-17) and API rate limiting (NFR-20).
-- Email delivery for password reset.
-- Endpoints for FR-07 onwards (products, inventory, sales, ...).
+- API endpoints for FR-07 onwards (products, inventory, sales, purchasing,
+  expenses, notifications).
+- Reporting, CSV import/export, configurable approval rules and system
+  administration (FR-25, FR-28 – FR-30).
+- Email delivery for password resets.
+- Multi-factor authentication for administrators (NFR-17) and API rate
+  limiting (NFR-20).
 
 ## Documentation
 
-See [`docs/Store-Management-System-SRS-v1.0.pdf`](docs/Store-Management-System-SRS-v1.0.pdf)
-for the full requirements specification.
+- [Software Requirements Specification](docs/Store-Management-System-SRS-v1.0.pdf):
+  the functional (FR) and non-functional (NFR) requirements.
+- [Product models](docs/product-models.md): design notes for FR-07 – FR-09.
