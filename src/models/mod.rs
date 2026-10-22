@@ -20,6 +20,7 @@ pub mod expense;
 pub mod ids;
 pub mod inventory;
 pub mod notification;
+pub mod permission;
 pub mod price_history;
 pub mod product;
 pub mod product_variant;
@@ -49,6 +50,7 @@ pub use expense::{Expense, ExpenseCategory, ExpensePaymentStatus, ExpenseStatus}
 pub use ids::*;
 pub use inventory::{InventoryBatch, InventoryItem, StockMovement, StockMovementType};
 pub use notification::{Notification, NotificationChannel, NotificationEvent, NotificationStatus};
+pub use permission::Permission;
 pub use price_history::{PriceHistory, PriceType};
 pub use product::{Product, UnitOfMeasure};
 pub use product_variant::ProductVariant;
