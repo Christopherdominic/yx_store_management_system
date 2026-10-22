@@ -18,10 +18,14 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+use std::collections::BTreeMap;
+
 use crate::models::{
     Address, AuditAction, AuditActor, AuditLog, AuditLogId, AuditOutcome, Business, BusinessId,
-    BusinessStatus, ContactInfo, CurrencyCode, RecordRef, RecordType, Role, RoleAssignment,
-    RoleAssignmentId, Store, StoreId, StoreStatus, User, UserId, UserStatus,
+    BusinessStatus, ContactInfo, CurrencyCode, PriceHistory, PriceHistoryId, PriceType, Product,
+    ProductCategory, ProductCategoryId, ProductId, ProductVariant, ProductVariantId, RecordRef,
+    RecordStatus, RecordType, Role, RoleAssignment, RoleAssignmentId, Store, StoreId, StoreStatus,
+    UnitOfMeasure, User, UserId, UserStatus,
 };
 
 type ArgumentBuffer = <Postgres as sqlx::Database>::ArgumentBuffer;
@@ -58,7 +62,17 @@ macro_rules! uuid_column {
     )+};
 }
 
-uuid_column!(BusinessId, StoreId, UserId, RoleAssignmentId, AuditLogId);
+uuid_column!(
+    BusinessId,
+    StoreId,
+    UserId,
+    RoleAssignmentId,
+    AuditLogId,
+    ProductCategoryId,
+    ProductId,
+    ProductVariantId,
+    PriceHistoryId,
+);
 
 fn to_text<T: Serialize>(value: &T) -> Result<String, BoxDynError> {
     match serde_json::to_value(value)? {
@@ -102,9 +116,12 @@ text_column!(
     AuditOutcome,
     BusinessStatus,
     CurrencyCode,
+    PriceType,
+    RecordStatus,
     RecordType,
     Role,
     StoreStatus,
+    UnitOfMeasure,
     UserStatus,
 );
 
@@ -204,6 +221,89 @@ impl<'r> FromRow<'r, PgRow> for AuditLog {
             occurred_at: row.try_get("occurred_at")?,
         })
     }
+}
+
+impl<'r> FromRow<'r, PgRow> for ProductCategory {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            business_id: row.try_get("business_id")?,
+            parent_id: row.try_get("parent_id")?,
+            name: row.try_get("name")?,
+            description: row.try_get("description")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> FromRow<'r, PgRow> for Product {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            business_id: row.try_get("business_id")?,
+            category_id: row.try_get("category_id")?,
+            name: row.try_get("name")?,
+            description: row.try_get("description")?,
+            sku: row.try_get("sku")?,
+            barcode: row.try_get("barcode")?,
+            brand: row.try_get("brand")?,
+            image_url: row.try_get("image_url")?,
+            unit_of_measure: row.try_get("unit_of_measure")?,
+            cost_price: row.try_get("cost_price")?,
+            selling_price: row.try_get("selling_price")?,
+            attributes: attributes(row)?,
+            tracks_batches: row.try_get("tracks_batches")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> FromRow<'r, PgRow> for ProductVariant {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            business_id: row.try_get("business_id")?,
+            product_id: row.try_get("product_id")?,
+            name: row.try_get("name")?,
+            sku: row.try_get("sku")?,
+            barcode: row.try_get("barcode")?,
+            attributes: attributes(row)?,
+            cost_price: row.try_get("cost_price")?,
+            selling_price: row.try_get("selling_price")?,
+            status: row.try_get("status")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> FromRow<'r, PgRow> for PriceHistory {
+    fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            business_id: row.try_get("business_id")?,
+            product_id: row.try_get("product_id")?,
+            variant_id: row.try_get("variant_id")?,
+            price_type: row.try_get("price_type")?,
+            previous_price: row.try_get("previous_price")?,
+            new_price: row.try_get("new_price")?,
+            effective_at: row.try_get("effective_at")?,
+            changed_by: row.try_get("changed_by")?,
+            approved_by: row.try_get("approved_by")?,
+            reason: row.try_get("reason")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+fn attributes(row: &PgRow) -> Result<BTreeMap<String, String>, sqlx::Error> {
+    Ok(row
+        .try_get::<Json<BTreeMap<String, String>>, _>("attributes")?
+        .0)
 }
 
 fn contact(row: &PgRow) -> Result<ContactInfo, sqlx::Error> {

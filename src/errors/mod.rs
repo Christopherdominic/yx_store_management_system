@@ -82,6 +82,15 @@ impl From<sqlx::Error> for AppError {
             let message = match db_err.constraint() {
                 Some("users_email_lower_key") => "a user with this email already exists",
                 Some("stores_business_code_key") => "a store with this code already exists",
+                Some("catalog_codes_sku_key") => {
+                    "this SKU is already used by another product or variant"
+                }
+                Some("catalog_codes_barcode_key") => {
+                    "this barcode is already used by another product or variant"
+                }
+                Some("product_categories_sibling_name_key") => {
+                    "a category with this name already exists at this level"
+                }
                 _ => "a record with the same unique value already exists",
             };
             return Self::Conflict(message.into());
