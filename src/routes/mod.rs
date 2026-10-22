@@ -1,11 +1,11 @@
 use axum::{
     Router,
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    controllers::{audit, auth, businesses, employees, stores},
+    controllers::{audit, auth, businesses, categories, employees, products, stores},
     state::AppState,
 };
 
@@ -86,4 +86,61 @@ fn api() -> Router<AppState> {
         )
         // Audit trail (FR-01, FR-06)
         .route("/businesses/{business_id}/audit-logs", get(audit::list))
+        .merge(catalog())
+}
+
+/// Product catalogue (FR-07 – FR-09).
+fn catalog() -> Router<AppState> {
+    const CATEGORY: &str = "/businesses/{business_id}/product-categories/{category_id}";
+    const PRODUCT: &str = "/businesses/{business_id}/products/{product_id}";
+    const VARIANT: &str = "/businesses/{business_id}/products/{product_id}/variants/{variant_id}";
+
+    Router::new()
+        // Categories (FR-08)
+        .route(
+            "/businesses/{business_id}/product-categories",
+            get(categories::list).post(categories::create),
+        )
+        .route(CATEGORY, get(categories::get).patch(categories::update))
+        .route(&format!("{CATEGORY}/archive"), post(categories::archive))
+        .route(&format!("{CATEGORY}/restore"), post(categories::restore))
+        // Products (FR-07) and lookup by SKU or barcode (FR-08)
+        .route(
+            "/businesses/{business_id}/products",
+            get(products::list).post(products::create),
+        )
+        .route(
+            "/businesses/{business_id}/products/lookup",
+            get(products::lookup),
+        )
+        .route(PRODUCT, get(products::get).patch(products::update))
+        .route(&format!("{PRODUCT}/archive"), post(products::archive))
+        .route(&format!("{PRODUCT}/restore"), post(products::restore))
+        // Prices and price history (FR-09)
+        .route(&format!("{PRODUCT}/prices"), patch(products::change_prices))
+        .route(
+            &format!("{PRODUCT}/price-history"),
+            get(products::price_history),
+        )
+        // Variants (FR-08)
+        .route(
+            &format!("{PRODUCT}/variants"),
+            get(products::list_variants).post(products::create_variant),
+        )
+        .route(
+            VARIANT,
+            get(products::get_variant).patch(products::update_variant),
+        )
+        .route(
+            &format!("{VARIANT}/archive"),
+            post(products::archive_variant),
+        )
+        .route(
+            &format!("{VARIANT}/restore"),
+            post(products::restore_variant),
+        )
+        .route(
+            &format!("{VARIANT}/prices"),
+            patch(products::change_variant_prices),
+        )
 }

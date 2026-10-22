@@ -16,7 +16,7 @@ IDs such as FR-07 below refer to it.
 | --- | --- | :---: | :---: |
 | Business and store management | FR-01 – FR-03 | ✅ | ✅ |
 | Accounts and access control | FR-04 – FR-06 | ✅ | ✅ |
-| Product management | FR-07 – FR-09 | ✅ | — |
+| Product management | FR-07 – FR-09 | ✅ | ✅ |
 | Inventory and stock control | FR-10 – FR-14 | ✅ | — |
 | Sales, returns and customers | FR-15 – FR-19 | ✅ | — |
 | Purchasing, suppliers and transfers | FR-20 – FR-23 | ✅ | — |
@@ -218,14 +218,63 @@ PATCH requests are partial: omitted fields stay unchanged and `""` clears an
 optional field. Audit logs can be filtered by `actor_user_id`, `action`,
 `store_id`, `record_id`, `outcome`, `from`, `to`, `limit` and `offset`.
 
+#### Product catalogue
+
+Paths below start with `/businesses/{business_id}`. `{product}` is
+`/products/{product_id}` and `{variant}` is `{product}/variants/{variant_id}`.
+
+| Method | Path | Permission | FR |
+| --- | --- | --- | --- |
+| GET | `/product-categories?status=&parent_id=` | `product_view` | FR-08 |
+| POST | `/product-categories` | `product_manage` | FR-08 |
+| GET, PATCH | `/product-categories/{category_id}` | `product_view`, `product_manage` | FR-08 |
+| POST | `/product-categories/{category_id}/archive`, `/restore` | `product_manage` | FR-08 |
+| GET | `/products?q=&category_id=&status=&limit=&offset=` | `product_view` | FR-07 |
+| POST | `/products` | `product_manage` | FR-07 |
+| GET | `/products/lookup?code=` | `product_view` | FR-08 |
+| GET, PATCH | `{product}` | `product_view`, `product_manage` | FR-07 |
+| POST | `{product}/archive`, `{product}/restore` | `product_manage` | FR-07 |
+| PATCH | `{product}/prices` | `price_manage` | FR-09 |
+| GET | `{product}/price-history?variant_id=&price_type=` | `product_view` | FR-09 |
+| GET, POST | `{product}/variants?status=` | `product_view`, `product_manage` | FR-08 |
+| GET, PATCH | `{variant}` | `product_view`, `product_manage` | FR-08 |
+| POST | `{variant}/archive`, `{variant}/restore` | `product_manage` | FR-08 |
+| PATCH | `{variant}/prices` | `price_manage` | FR-09 |
+
+```bash
+# Create a product, then raise its selling price
+curl -X POST localhost:8080/api/v1/businesses/$BUSINESS_ID/products -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name":"Rice 50kg","sku":"RICE-50","barcode":"6151234567890","unit_of_measure":"bag",
+       "cost_price":"65000.00","selling_price":"72500.00"}'
+curl -X PATCH localhost:8080/api/v1/businesses/$BUSINESS_ID/products/$PRODUCT_ID/prices \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"selling_price":"75000.00","reason":"Supplier increase"}'
+```
+
+- **Prices** are decimal strings with at most 2 decimal places, such as
+  `"72500.50"`. They can't be changed with a product or variant PATCH; use
+  `.../prices`, which records each changed price in the price history.
+- **SKUs** are uppercased and, like barcodes, unique across all products and
+  variants in the business. `/products/lookup?code=` finds a product or
+  variant by exact SKU or barcode, for barcode scanners.
+- **Variants** take the product's prices when none are given.
+- **Archived** products, variants and categories stay readable. Archived
+  products can't get new variants or price changes, and archived categories
+  can't get new products or subcategories.
+
 ### Roles and permissions
 
 | Role | Scope | Can |
 | --- | --- | --- |
 | `business_owner` | All stores | Everything, including granting owner and administrator roles |
 | `administrator` | All stores | Everything except granting business roles or changing owners and administrators |
-| `store_manager` | Assigned store | View and edit the store and its settings, view its staff |
-| `cashier`, `inventory_officer`, `finance_officer` | Assigned store | View the store |
+| `store_manager` | Assigned store | View and edit the store and its settings, view its staff; manage products and prices |
+| `inventory_officer` | Assigned store | View the store; manage products (not prices) |
+| `cashier`, `finance_officer` | Assigned store | View the store and the product catalogue |
+
+The product catalogue is shared by every store in the business, so product
+permissions held at any store apply to the whole catalogue.
 
 Each user belongs to one business. They hold at most one business-wide role
 and one role per store, so someone can be a manager in Lagos and a cashier in
@@ -258,8 +307,10 @@ returns `403` and is recorded in the audit log as `access_denied`.
 
 ## Not yet covered
 
-- API endpoints for FR-07 onwards (products, inventory, sales, purchasing,
-  expenses, notifications).
+- API endpoints for FR-10 onwards (inventory, sales, purchasing, expenses,
+  notifications).
+- Price-change approval thresholds and future-dated price changes (FR-09,
+  FR-29): price changes currently apply immediately.
 - Reporting, CSV import/export, configurable approval rules and system
   administration (FR-25, FR-28 – FR-30).
 - Email delivery for password resets.

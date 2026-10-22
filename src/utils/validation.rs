@@ -1,10 +1,18 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
+
+use rust_decimal::Decimal;
+use serde::{Deserialize, Deserializer};
 
 use crate::{
     errors::{AppError, FieldError},
-    models::{Address, CurrencyCode},
+    models::{Address, CurrencyCode, Money},
     utils::currency::is_valid_currency,
 };
+
+/// Largest price accepted; matches the `NUMERIC(14, 2)` columns.
+fn max_price() -> Decimal {
+    Decimal::new(99_999_999_999_999, 2)
+}
 
 pub const MIN_PASSWORD_LEN: usize = 8;
 pub const MAX_PASSWORD_LEN: usize = 128;
@@ -121,6 +129,67 @@ impl Validator {
         }
     }
 
+    /// Product and variant SKUs: 1-64 characters of A-Z, 0-9, '-', '_' or '.'.
+    pub fn sku(&mut self, field: &str, value: &str) {
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && value
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "-_.".contains(c));
+        if !valid {
+            self.error(
+                field,
+                "must be 1-64 characters of A-Z, 0-9, '-', '_' or '.'",
+            );
+        }
+    }
+
+    /// Barcodes (EAN, UPC, Code 128, ...): 1-64 letters, digits or '-'.
+    pub fn barcode(&mut self, field: &str, value: Option<&str>) {
+        if let Some(v) = value
+            && (v.len() > 64 || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        {
+            self.error(field, "must be 1-64 letters, digits or '-'");
+        }
+    }
+
+    /// Money in the business currency: not negative, at most 2 decimal places.
+    pub fn price(&mut self, field: &str, value: Money) {
+        if value.is_sign_negative() && !value.is_zero() {
+            self.error(field, "must not be negative");
+        } else if value.normalize().scale() > 2 {
+            self.error(field, "must have at most 2 decimal places");
+        } else if value > max_price() {
+            self.error(field, "is too large");
+        }
+    }
+
+    pub fn url(&mut self, field: &str, value: Option<&str>) {
+        if let Some(v) = value
+            && (v.len() > 2000
+                || !(v.starts_with("https://") || v.starts_with("http://"))
+                || v.chars().any(char::is_whitespace))
+        {
+            self.error(field, "must be an http(s) URL of at most 2000 characters");
+        }
+    }
+
+    /// Free-form key/value attributes such as size or colour.
+    pub fn attributes(&mut self, field: &str, attributes: &BTreeMap<String, String>) {
+        if attributes.len() > 30 {
+            self.error(field, "must have at most 30 entries");
+        }
+        for (key, value) in attributes {
+            if key.is_empty() || key.chars().count() > 50 {
+                self.error(field, "keys must be 1-50 characters");
+                break;
+            }
+            if value.is_empty() || value.chars().count() > 200 {
+                self.error(&format!("{field}.{key}"), "must be 1-200 characters");
+            }
+        }
+    }
+
     pub fn finish(self) -> Result<(), AppError> {
         if self.errors.is_empty() {
             Ok(())
@@ -163,6 +232,25 @@ pub fn patch_opt(current: Option<String>, incoming: Option<String>) -> Option<St
     }
 }
 
+/// Trims attribute keys and values.
+pub fn clean_attributes(attributes: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    attributes
+        .into_iter()
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+/// For PATCH fields that can be cleared with `null`: absent → `None`,
+/// `null` → `Some(None)`, a value → `Some(Some(value))`. Use with
+/// `#[serde(default, deserialize_with = "nullable")]`.
+pub fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 /// Escapes `%`, `_` and `\` so user input is matched literally in ILIKE.
 pub fn like_pattern(term: &str) -> String {
     let escaped = term
@@ -186,4 +274,38 @@ pub fn clean_address(address: Address) -> Address {
 
 pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn price_errors(value: Money) -> usize {
+        let mut v = Validator::new();
+        v.price("price", value);
+        v.errors.len()
+    }
+
+    #[test]
+    fn price_limits() {
+        assert_eq!(max_price(), dec!(999_999_999_999.99));
+        assert_eq!(price_errors(dec!(0)), 0);
+        assert_eq!(price_errors(dec!(72500.50)), 0);
+        assert_eq!(price_errors(dec!(1.500)), 0, "trailing zeros are fine");
+        assert_eq!(price_errors(dec!(-0.01)), 1);
+        assert_eq!(price_errors(dec!(1.005)), 1);
+        assert_eq!(price_errors(dec!(1_000_000_000_000)), 1);
+    }
+
+    #[test]
+    fn sku_and_barcode_rules() {
+        let mut v = Validator::new();
+        v.sku("sku", "RICE-50KG_1.0");
+        v.barcode("barcode", Some("6151234567890"));
+        assert!(v.errors.is_empty());
+        v.sku("sku", "rice 50");
+        v.barcode("barcode", Some("12 34"));
+        assert_eq!(v.errors.len(), 2);
+    }
 }

@@ -20,15 +20,30 @@ pub enum Permission {
     /// Grant or revoke the business owner / administrator roles.
     BusinessRoleManage,
     AuditLogView,
+    /// View categories, products, variants and price history (FR-07 – FR-09).
+    ProductView,
+    /// Create, edit, archive and restore categories, products and variants.
+    ProductManage,
+    /// Change cost and selling prices (FR-09).
+    PriceManage,
 }
 
 impl Permission {
     /// Permissions a store role may hold for its own store. Everything else
     /// requires a business-wide role.
+    ///
+    /// The product catalogue is shared by every store in the business, so
+    /// product permissions held at any store apply to the whole catalogue.
     pub fn is_store_scoped(self) -> bool {
         matches!(
             self,
-            Self::StoreView | Self::StoreUpdate | Self::StoreSettingsUpdate | Self::EmployeeView
+            Self::StoreView
+                | Self::StoreUpdate
+                | Self::StoreSettingsUpdate
+                | Self::EmployeeView
+                | Self::ProductView
+                | Self::ProductManage
+                | Self::PriceManage
         )
     }
 }
@@ -60,6 +75,9 @@ impl Role {
                 EmployeeManage,
                 BusinessRoleManage,
                 AuditLogView,
+                ProductView,
+                ProductManage,
+                PriceManage,
             ],
             Role::Administrator => &[
                 BusinessView,
@@ -73,6 +91,9 @@ impl Role {
                 EmployeeView,
                 EmployeeManage,
                 AuditLogView,
+                ProductView,
+                ProductManage,
+                PriceManage,
             ],
             Role::StoreManager => &[
                 BusinessView,
@@ -80,10 +101,12 @@ impl Role {
                 StoreUpdate,
                 StoreSettingsUpdate,
                 EmployeeView,
+                ProductView,
+                ProductManage,
+                PriceManage,
             ],
-            Role::Cashier | Role::InventoryOfficer | Role::FinanceOfficer => {
-                &[BusinessView, StoreView]
-            }
+            Role::InventoryOfficer => &[BusinessView, StoreView, ProductView, ProductManage],
+            Role::Cashier | Role::FinanceOfficer => &[BusinessView, StoreView, ProductView],
         }
     }
 

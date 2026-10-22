@@ -21,23 +21,34 @@ Prices use `Decimal` and serialize as strings to preserve decimal precision.
 They are expressed in the business currency; currency configuration and allowed
 precision must be enforced by the application. All timestamps use UTC.
 
-## Service and persistence responsibilities
+## How the API enforces the rules
 
-These are data models, not request validation or database migrations. Required
-text must be nonblank, prices nonnegative, and attribute names/values valid.
-Category, product, variant, and actor relationships must belong to the same
-business. A history variant must belong to its recorded parent product.
+The endpoints live in `src/services/products.rs` and
+`src/services/categories.rs` (see the README for the list).
 
-Enforce SKU uniqueness across products and variants within each business, and
-uniqueness of assigned barcodes within the same lookup scope. Use database
-constraints or a shared identifier registry to prevent concurrent duplicates.
-Archive referenced entities instead of deleting them. Define category archival
-policy and prevent new sales of archived products or variants in services.
+- **Validation:** names are required, SKUs are 1-64 characters of A-Z, 0-9,
+  `-`, `_` or `.` (uppercased), barcodes are letters, digits or `-`, and
+  prices are not negative with at most 2 decimal places.
+- **Same business:** every query is scoped to the business in the URL, so a
+  category, product or variant from another business is reported as not
+  found.
+- **Unique codes:** SKUs and barcodes are registered in the `catalog_codes`
+  table in the same transaction as their product or variant. Its unique
+  indexes reject duplicates across products and variants, even when two
+  requests race.
+- **No deletes:** categories, products and variants are archived and can be
+  restored. Archived products can't get new variants or price changes;
+  archived categories can't get new products or subcategories. A category
+  can't be moved under itself or one of its subcategories.
+- **Prices:** prices change only through `PATCH .../prices`. The new price
+  and one history entry per changed price are written in one transaction,
+  with the user and an optional reason. History rows can't be updated or
+  deleted (a database trigger blocks it). Every change is also in the audit
+  log as `price_changed`.
 
-Apply price changes with authorization and configured approval thresholds. Write
-price history and current prices atomically; a change to both cost and selling
-price produces two history entries. Future-effective changes require scheduling
-in the service layer so they do not replace current prices prematurely.
+Not done yet: approval thresholds for price changes (FR-29) and
+future-dated price changes. Changes take effect immediately, and
+`approved_by` is always empty for now.
 
 Inventory, sale items, and stock movements already carry an optional variant
 ID, and completed sale items keep their own unit-price and discount snapshots.
@@ -50,5 +61,9 @@ ID, and completed sale items keep their own unit-price and discount snapshots.
 | `src/models/category.rs` | `ProductCategory` |
 | `src/models/product_variant.rs` | `ProductVariant` |
 | `src/models/price_history.rs` | `PriceHistory`, `PriceType` |
+| `src/services/categories.rs`, `src/services/products.rs` | Business rules and SQL |
+| `src/controllers/categories.rs`, `src/controllers/products.rs` | HTTP handlers |
+| `migrations/0002_products.sql` | Tables |
+| `tests/products.rs` | API tests |
 
-Run the model tests with `cargo test`.
+Run the tests with `DATABASE_URL=... cargo test` (see the README).
